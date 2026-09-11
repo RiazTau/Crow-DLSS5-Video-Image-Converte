@@ -1,0 +1,4 @@
+onnxruntime-directml==1.24.4
+numpy>=1.26,<3
+Pillow>=10,<13
+opencv-python-headless>=4.10,<5
