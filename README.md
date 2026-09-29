@@ -1,106 +1,135 @@
-# Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2 — Native NVOF D3D12 Execute Bridge
+# Crow - DLSS Rendering Tool
 
-V0.6.6-alpha2 activates the first native NVIDIA Optical Flow DirectX 12 Execute path. The alpha1 runtime/SDK probe has passed on RTX 4090 Laptop GPU; alpha2 adds SDK-ABI-gated resource registration, explicit D3D12 fence synchronization, NvOFExecuteD3D12, cost readback and a synthetic motion self-test. The working default remains V0.6.5.3 Adaptive Stable DIS; the accepted Direct NGX DLSSNR Feature 18 / RTX40+RTX50 compatibility path is preserved.
+**Current public source release: `v0.7.3-alpha1`**
+Windows x64 · NVIDIA RTX · Experimental / alpha software
 
-## NVOF alpha status
+Crow is an experimental Windows rendering/conversion tool that combines NVIDIA DLSS Neural Rendering, Frame Generation / Multi Frame Generation, NVIDIA Optical Flow, external render guidance, Auto Depth, and an optional SEA-RAFT neural optical-flow backend in one workflow.
 
-The Video Converter now contains a fifth Temporal mode:
+> This GitHub package is **source-only**. NVIDIA runtime DLLs, the NVIDIA Optical Flow SDK, PyTorch, SEA-RAFT source/weights, FFmpeg binaries, downloaded model weights, and local virtual environments are intentionally not vendored.
 
-`NVIDIA Optical Flow - NVOF D3D12 Alpha`
+## Feature overview
 
-Alpha2 enables the first native vendor-header `NvOFExecuteD3D12` bridge. CMake first compiles an SDK 5.x ABI contract probe; only a matching SDK enables `DLSS5_NVOF_D3D12_BRIDGE_READY=1`. The implementation then creates an NVOF context on the converter's existing NVIDIA D3D12 device, registers D3D12 resources, executes current->previous flow and reads the S10.5 vectors / UINT8 cost into the existing temporal postprocessor.
+- **DLSS Neural Rendering for images and video**, including configurable image iterations.
+- **Recursive DLSS5 image passes**: `DLSS5 Passes` can run `1–8` complete passes, feeding each completed image back into the next pass independently of `Iterations`.
+- **Frame Generation / Multi Frame Generation (FG/MFG)** with capability-driven output multipliers and an optional NVAPI model preset path.
+- **NVIDIA Optical Flow (NVOF)** with full-resolution and multi-scale motion paths, predictive reconstruction, confidence, visibility and uncertainty handling.
+- **SEA-RAFT neural optical flow** with Spring-S / Spring-M models, selectable resolution/refinement controls and a CUDA PyTorch runtime.
+- **External Motion / Depth guidance** from EXR sequences, including calibration and shared NR/FG guidance paths.
+- **Auto Depth** using a pinned Depth Anything V2 Small ONNX model through ONNX Runtime DirectML.
+- **Video processing and portable packaging** through FFmpeg/ffprobe, with diagnostics, parameter persistence and motion preview tooling.
 
-NVIDIA's Optical Flow SDK remains user-supplied. No proprietary NVOF SDK package, sample, library or driver DLL is redistributed in this source package.
+## v0.7.3-alpha1 highlights
 
-## Prepare the NVIDIA Optical Flow SDK
+### Recursive DLSS5 image re-render
 
-1. Run `NVOF_SDK_SETUP.bat`.
-2. The helper opens NVIDIA's official Optical Flow download page.
-3. Download/accept/extract Optical Flow SDK 5.x yourself.
-4. Select the extracted SDK root containing `NvOFInterface/nvOpticalFlowD3D12.h`.
-5. Re-run `AUTO_BUILD.bat` or `AUTO_BUILD_CN.bat`.
+Image Conversion adds **`DLSS5 Passes`** with values `1–8` (default `1`). Each completed DLSS5 image output becomes the input to the next pass.
 
-Only the local SDK path is stored in `.deps/nvof-sdk.path`.
+`DLSS5 Passes` is separate from the existing per-pass `Iterations` option. For example, `3 passes × 4 iterations` performs three complete image re-render passes, each using four internal evaluations.
 
-After building, first run `NVOF_RUNTIME_SELFTEST.bat`. It should report `Native bridge : READY`. Then run `NVOF_EXECUTE_SELFTEST.bat`; this performs a real `NvOFExecuteD3D12` call on a deterministic 640x360 translated pair and rejects wrong direction or fixed-point scale.
+### SEA-RAFT Runtime Hotfix5
 
-## NVOF native alpha2 data contract
+The current source includes the restored, validated SEA-RAFT runtime fixes from the Hotfix5 lineage:
 
-The new C++ postprocessor is ready for the hardware bridge:
+- avoids the PowerShell `$Args` automatic-variable collision;
+- validates `.venv\Scripts\python.exe` immediately after venv creation;
+- validates CUDA PyTorch and `torchvision` independently;
+- provides mainland-China mirror-first installation with official fallback where appropriate;
+- uses GitCode mirror-first checkout for SEA-RAFT with official GitHub fallback;
+- uses `hf-mirror` first for model prefetch in CN mode, then official Hugging Face fallback;
+- loads Hugging Face checkpoints with `RAFT.from_pretrained(..., strict=False)`;
+- supports `--check-only` Spring-S / Spring-M model-load smoke tests.
 
-- NVOFA packed signed S10.5 motion is decoded as `raw / 32` pixels.
-- The native hardware call uses `input=current` and `reference=previous`, so NVOFA forward flow is already the converter's required `current -> previous` convention.
-- Alpha2 intentionally executes forward flow only. The postprocessor retains forward/backward consistency support for a later validation step.
-- Optional 8-bit NVOFA cost is interpreted conservatively: higher cost lowers confidence.
-- Photometric reprojection is a third confidence signal; cost alone is not treated as perfect confidence.
-- Coarse vector grids are interpolated to full resolution without scaling vector magnitude by grid spacing.
-- Scene-cut resets remain compatible with the existing denoiser/depth/DLSSNR history pipeline.
+### Existing rendering pipeline retained
 
-## Existing video modes retained
+The release keeps the established V0.7.2 alpha6/sr2 pipeline:
 
-- Legacy reset every frame
-- Adaptive Stable DIS (working default)
-- CPU Block Flow fallback
-- External EXR Motion / CG ground truth
-- NVIDIA Optical Flow / NVOF D3D12 Alpha
-
-The 2x2 Original / DLSS5 Output / Depth Guidance / Motion Vectors preview, image/video parameter persistence, per-parameter Reset, External EXR Depth/Motion auto calibration, Full HQ Temporal Denoise, AV1 resilience and V0.6.3 performance path are retained.
-
-## Important files
-
-- `src/video/NvofRuntimeProbe.*`
-- `src/video/NvofFlowPostprocess.*`
-- `src/video/NvofFlowSession.*`
-- `src/video/NvofD3D12Bridge.*`
-- `src/tools/NvofSelfTest.cpp`
-- `src/tools/NvofExecuteSelfTest.cpp`
-- `NVOF_EXECUTE_SELFTEST.bat`
-- `scripts/setup_nvof_sdk.ps1`
-- `docs/CHANGELOG_V0.6.6_ALPHA1_NVOF.md`
-- `docs/CHANGELOG_V0.6.6_ALPHA2_NVOF_EXECUTE.md`
-- `docs/RESEARCH_OPTICAL_FLOW_BACKENDS_2026-09-04.md`
+- unified NR, FG/MFG, and NR → FG/MFG video conversion;
+- NVOF full + multi-scale motion paths with predictive/temporal reconstruction;
+- optional SEA-RAFT tunable neural motion backend;
+- External EXR Motion / Depth guidance;
+- Auto Depth;
+- capability-driven FG/MFG multiplier handling;
+- optional NVAPI FG preset integration;
+- persisted image/video parameters and motion preview tooling.
 
 
-## V0.6.6-alpha2 lifecycle + NVOF tuning hotfix
+## Inherited architecture lineage
 
-The first real-video NVOF path is now hardened for both normal completion and user cancellation. The GUI no longer applies thread-wide `CancelSynchronousIo` to the conversion worker; cancellation is cooperative so NVIDIA/D3D12 calls can finish before teardown. NVOF cleanup is explicit and ordered as fence/drain -> unregister -> release client D3D12 resources -> `NvOFDestroy`, and the NVOF session is explicitly reset before the worker reports completion.
+The current release retains the earlier Crow motion/rendering work rather than replacing it. The inherited lineage includes **Adaptive Stable Motion**, **Adaptive Reliable Motion**, **Temporal Consensus Motion**, **Spatial-Temporal Dual-Path Motion**, **Visibility-Aware Uncertainty Motion**, and **Predictive Multi-Scale Motion Reconstruction**. These names are preserved in the historical changelogs and contract tests.
 
-When `NVIDIA Optical Flow - NVOF D3D12 Alpha` is selected, four persisted controls are available: **NVOF Quality** (Slow/Medium/Fast), **NVOF Grid** (4x4/2x2/1x1 with runtime capability validation), **NVOF Temporal Hints**, and **NVOF Output Cost**. The validated defaults remain Slow + 4x4 + hints on + cost on.
+Parameter persistence still uses per-control reset behavior. There is deliberately no `Reset All` action.
 
-See `docs/HOTFIX_V0.6.6_ALPHA2_NVOF_LIFECYCLE_UI.md`.
+## Build
 
-## Next alpha milestone
+The only root build entry is:
 
-After the real-video alpha2 path is stable, the next step is performance/quality hardening: GPU-resident ping-pong inputs, reduced CPU/GPU synchronization, and forward/backward consistency testing. 2x2/1x1 grids are now exposed for capability-gated real-machine validation, while 4x4 remains the validated default. Alpha2 performance should not yet be used as the final NVOF-vs-DIS benchmark because it intentionally uploads both RGBA frames and reads flow/cost back every pair.
-
-## Retained V0.6.5.3 behavior
-
-V0.6.5.3 **Adaptive Stable Motion** remains the working automatic-motion fallback and is unchanged in this alpha. Existing parameter persistence is also unchanged. There is deliberately no `Reset All` action.
-
-## V0.6.6-alpha2 ABGR/BGRA D3D12 surface hotfix
-
-- Fixed the first RTX 4090 Laptop native-video validation failure: the D3D12 driver reports `DXGI_FORMAT_B8G8R8A8_UNORM` (87) for the ABGR8 input usage rather than `DXGI_FORMAT_R8G8B8A8_UNORM`.
-- The bridge now obeys `nvOFGetSurfaceFormatD3D12` instead of hard-coding RGBA8, prefers the validated BGRA8 DXGI surface, and swizzles the converter's internal RGBA bytes to BGRA at the NVOF upload boundary.
-- RGBA8 is retained only as a compatibility fallback when a driver explicitly advertises it. NV12/R8 remain reported diagnostics rather than silently changing the initialized ABGR8 contract.
-
-## Portable package generator
-
-V0.6.6-alpha2 carries forward the validated V0.6.5.3 Portable Edition packaging path. The recommended mainland-China entry point is `BUILD_PORTABLE_CN.bat`; `BUILD_PORTABLE.bat` uses the standard download sources.
-
-Before running the portable generator, configure the NVIDIA Optical Flow SDK with `NVOF_SDK_SETUP.bat`. The portable generator intentionally never downloads `nvngx_dlssnr.dll`; if no validated runtime is already present in `dist/runtime`, it opens the existing manual file picker and lets you select one before compilation.
-
-The generated package keeps the converter binaries on `/MD` to remain ABI-compatible with NVIDIA NGX and deploys the matching x64 VC143 CRT app-local. The same CRT DLL set is also copied beside the embedded Python executable so OpenCV/ONNX Runtime extension modules remain usable on a clean Windows target without a separately installed VC++ Redistributable.
-
-The portable tree contains FFmpeg/ffprobe, the Depth Anything V2 model, a relocatable x64 CPython environment with AutoDepth/DIS dependencies, the converter/self-test executables and the manually imported DLSSNR runtime. NVIDIA Optical Flow SDK headers are build-time only and are not redistributed; `nvofapi64.dll` continues to come from the target PC's NVIDIA display driver.
-
-The final ZIP is created by `scripts/zip_portable.py` using Python `zipfile` + Zip64 rather than Windows PowerShell 5.1 `Compress-Archive`. `scripts/portable_stage.py` removes unused ONNX Runtime developer-tool paths and Python caches before archiving to avoid recurrence of the V0.6.5.3 long-path failure.
-
-Expected output:
-
-```text
-portable/
-  Crow-DLSS5-Video-Image-Converter-V0.6.6-alpha2-Portable-x64/
-  Crow-DLSS5-Video-Image-Converter-V0.6.6-alpha2-Portable-x64.zip
+```bat
+BUILD.bat
 ```
 
-See `docs/CHANGELOG_V0.6.6_ALPHA2_PORTABLE_GENERATOR.md` for the packaging contract.
+Build Center options include:
+
+1. Unified NR + FG full build — CN sources
+2. Unified NR + FG full build — Official/global sources
+3. FG diagnostic standalone — CN sources
+4. FG diagnostic standalone — Official/global sources
+5. Portable build — CN sources
+6. Portable build — Official/global sources
+7. Refresh NVIDIA NVAPI SDK
+
+See [`docs/BUILD_zh-CN.md`](docs/BUILD_zh-CN.md) for the detailed Chinese build guide.
+
+### Required / external components
+
+A normal full build may require or acquire the following outside this repository:
+
+- Visual Studio 2022 C++ Build Tools and Windows SDK;
+- NVIDIA display driver;
+- NVIDIA Optical Flow SDK 5.x;
+- NVIDIA DLSS / NGX SDK checkout;
+- user-supplied `nvngx_dlssnr.dll` appropriate for the installed GPU generation;
+- DLSS-G runtime;
+- TinyEXR;
+- FFmpeg;
+- Python and Auto Depth dependencies;
+- CUDA PyTorch, SEA-RAFT source, and Spring-S / Spring-M weights when SEA-RAFT is installed.
+
+The build scripts keep these downloaded/runtime components outside the tracked Git source through `.gitignore`.
+
+## Output layout
+
+A completed build uses the following structure:
+
+```text
+dist/
+├─ Crow-DLSS-Rendering-Tool.exe
+├─ Crow-DLSS-Rendering-Tool-Image.exe
+├─ runtime/
+│  ├─ nvngx_dlssnr.dll
+│  └─ nvngx_dlssg.dll
+├─ tools/
+├─ video/
+├─ auto_depth/
+├─ sea_raft/
+└─ models/
+```
+
+## SEA-RAFT dependency boundary
+
+SEA-RAFT is an independent Princeton Vision & Learning Lab project licensed separately under BSD-3-Clause. Crow ships an integration adapter and setup/runtime worker, but this source release does **not** vendor the upstream SEA-RAFT repository, PyTorch, or model weights. See [`sea_raft/README_zh-CN.md`](sea_raft/README_zh-CN.md) and [`docs/NOTICE.md`](docs/NOTICE.md).
+
+## Validation status
+
+The v0.7.3-alpha1 source package passed the repository Python/contract suite used for this release (`48 passed`) and Python syntax validation of the SEA-RAFT worker. This remains alpha software; GPU/runtime behavior depends on the installed NVIDIA driver, runtime DLLs, SDKs, and hardware.
+
+## Release history
+
+Detailed historical design notes, tests, and hotfix documents are kept under [`docs/`](docs/). Current release-specific notes:
+
+- [`docs/CHANGELOG_V0.7.3_ALPHA1_STRICT_IMAGE_ONLY_REWRITE.md`](docs/CHANGELOG_V0.7.3_ALPHA1_STRICT_IMAGE_ONLY_REWRITE.md)
+- [`docs/HOTFIX_V0.7.3_ALPHA1_SEA_RAFT_RUNTIME_HOTFIX5.md`](docs/HOTFIX_V0.7.3_ALPHA1_SEA_RAFT_RUNTIME_HOTFIX5.md)
+- [`RELEASE_NOTES_V0.7.3_ALPHA1.md`](RELEASE_NOTES_V0.7.3_ALPHA1.md)
+
+## License
+
+Crow source is distributed under the **GNU General Public License v3.0**. Third-party components retain their own licenses. See [`LICENSE`](LICENSE) and [`docs/NOTICE.md`](docs/NOTICE.md).

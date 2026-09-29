@@ -1,0 +1,67 @@
+name: Source validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  contracts:
+    name: Python / contract suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install contract-test dependencies
+        run: python -m pip install --upgrade pip pytest "numpy>=1.26,<3" "opencv-python-headless>=4.10,<5"
+      - name: Run contract tests
+        run: python -m pytest -q tests
+      - name: Validate SEA-RAFT worker syntax
+        run: python -m py_compile sea_raft/sea_raft_video.py
+
+  windows-compile:
+    name: Windows x64 compile check
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch NVIDIA DLSS SDK
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git .deps/NVIDIA-DLSS
+
+      - name: Fetch TinyEXR
+        shell: pwsh
+        run: git clone --depth 1 --branch release https://github.com/syoyo/tinyexr.git .deps/tinyexr
+
+      - name: Configure source-only CI build
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -A x64
+          -DNGX_SDK_DIR="$pwd/.deps/NVIDIA-DLSS"
+          -DTINYEXR_DIR="$pwd/.deps/tinyexr"
+
+      - name: Build main targets
+        shell: pwsh
+        run: >-
+          cmake --build build --config Release --parallel --target
+          crow-cli crow-image-gui crow-runtime-selftest crow-video-gui crow-fg-gui
+
+      - name: Stage compile-only artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package/tools | Out-Null
+          Copy-Item dist/Crow-DLSS-Rendering-Tool.exe package/
+          Copy-Item dist/Crow-DLSS-Rendering-Tool-Image.exe package/
+          Copy-Item dist/tools/Crow-DLSS-Rendering-Tool-CLI.exe package/tools/
+          Copy-Item dist/tools/Crow-DLSS-Rendering-Tool-Runtime-Self-Test.exe package/tools/
+          Copy-Item dist/tools/Crow-DLSS-Rendering-Tool-FG-Diagnostic.exe package/tools/
+          Copy-Item README.md,LICENSE,GITHUB_SOURCE_NOTICE.md package/
+          Set-Content -Path package/CI_ARTIFACT_NOTICE.txt -Value "Compile-only CI artifact. NVIDIA runtime DLLs, NVOF SDK/runtime setup, SEA-RAFT runtime, FFmpeg and models are not bundled."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Crow-DLSS-Rendering-Tool-v0.7.3-alpha1-compile-only
+          path: package

@@ -7,8 +7,8 @@ settings = (ROOT / 'src/video/VideoConverter.h').read_text(encoding='utf-8')
 cmake = (ROOT / 'CMakeLists.txt').read_text(encoding='utf-8')
 readme = (ROOT / 'README.md').read_text(encoding='utf-8')
 
-assert 'VERSION 0.6.4' in cmake or 'VERSION 0.6.5' in cmake or 'VERSION 0.6.6' in cmake
-assert ('V0.6.4 - Saved Parameters / Anti-Warp Defaults' in gui or 'V0.6.5 - External Render Data' in gui or 'V0.6.5.1 - External Data Auto Calibration' in gui or 'V0.6.5.2 - Motion Preview' in gui or 'V0.6.5.3 - Motion Preview' in gui or 'V0.6.5.3 - Adaptive Stable Motion' in gui or 'V0.6.6-alpha1 - NVOF D3D12 Foundation' in gui or 'V0.6.6-alpha2 - Native NVOF D3D12 Execute' in gui or 'Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2' in gui)
+assert any(v in cmake for v in ['VERSION 0.6.4','VERSION 0.6.5','VERSION 0.6.6','VERSION 0.7.1','VERSION 0.7.2','VERSION 0.7.3'])
+assert ('V0.6.4 - Saved Parameters / Anti-Warp Defaults' in gui or 'V0.6.5 - External Render Data' in gui or 'V0.6.5.1 - External Data Auto Calibration' in gui or 'V0.6.5.2 - Motion Preview' in gui or 'V0.6.5.3 - Motion Preview' in gui or 'V0.6.5.3 - Adaptive Stable Motion' in gui or 'V0.6.6-alpha1 - NVOF D3D12 Foundation' in gui or 'V0.6.6-alpha2 - Native NVOF D3D12 Execute' in gui or 'Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2' in gui or 'Crow - DLSS Rendering Tool V0.7.1-alpha1' in gui or 'Crow - DLSS Rendering Tool V0.7.2-alpha1' in gui or 'Crow - DLSS Rendering Tool V0.7.2-alpha2' in gui or 'Crow - DLSS Rendering Tool V0.7.2-alpha3' in gui or 'Crow - DLSS Rendering Tool V0.7.2-alpha4' in gui or 'Crow - DLSS Rendering Tool V0.7.2-alpha5' in gui or 'Crow - DLSS Rendering Tool V0.7.2-alpha6' in gui or 'Crow - DLSS Rendering Tool V0.7.3-alpha1' in gui)
 
 # Factory anti-warp profile must be centralized and reflected in VideoSettings defaults.
 for token in [

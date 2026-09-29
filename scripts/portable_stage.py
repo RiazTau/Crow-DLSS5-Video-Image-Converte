@@ -31,6 +31,15 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(p)
 
 
+def copy_tree(source: Path, destination: Path) -> None:
+    src = _win_long(source)
+    dst = _win_long(destination)
+    if not os.path.exists(src):
+        raise FileNotFoundError(source)
+    os.makedirs(dst, exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+
+
 def prune(root: Path) -> None:
     base = Path(_win_long(root))
     # ONNX Runtime developer tools are not used by inference and previously
@@ -66,16 +75,22 @@ def sha256(path: Path) -> str:
 
 def write_manifest(root: Path, output: Path, version: str) -> None:
     critical = [
-        "Crow-DLSS5-Video-Image-Converter-Image.exe",
-        "Crow-DLSS5-Video-Image-Converter-Video.exe",
-        "Crow-DLSS5-Video-Image-Converter-CLI.exe",
+        "Crow-DLSS-Rendering-Tool-Image.exe",
+        "Crow-DLSS-Rendering-Tool.exe",
+        "tools/Crow-DLSS-Rendering-Tool-FG-Diagnostic.exe",
+        "tools/Crow-DLSS-Rendering-Tool-CLI.exe",
         "runtime/nvngx_dlssnr.dll",
+        "runtime/nvngx_dlssg.dll",
         "video/ffmpeg/bin/ffmpeg.exe",
         "video/ffmpeg/bin/ffprobe.exe",
         "models/depth_anything_v2/model_fp16.onnx",
         "auto_depth/.venv/Scripts/python.exe",
         "auto_depth/.venv/Scripts/msvcp140.dll",
         "auto_depth/.venv/Scripts/vcruntime140.dll",
+        "sea_raft/.venv/Scripts/python.exe",
+        "sea_raft/vendor/SEA-RAFT/core/raft.py",
+        "sea_raft/models/spring-S/model.safetensors",
+        "sea_raft/models/spring-M/model.safetensors",
     ]
     records = []
     total_files = 0
@@ -96,7 +111,7 @@ def write_manifest(root: Path, output: Path, version: str) -> None:
         else:
             records.append({"path": rel, "missing": True})
     data = {
-        "product": "Crow-DLSS5-Video-Image-Converter",
+        "product": "Crow - DLSS Rendering Tool",
         "version": version,
         "architecture": "x64",
         "generated_utc": datetime.now(timezone.utc).isoformat(),
@@ -107,6 +122,8 @@ def write_manifest(root: Path, output: Path, version: str) -> None:
             "nvof_sdk_bundled": False,
             "nvof_runtime": "Provided by the NVIDIA display driver (nvofapi64.dll)",
             "msvc_runtime": "VC143 CRT bundled app-local to match NVIDIA NGX /MD ABI",
+            "dlssnr_runtime": "Bundled under runtime/nvngx_dlssnr.dll",
+            "dlssg_runtime": "Bundled under runtime/nvngx_dlssg.dll",
         },
     }
     output.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -117,6 +134,9 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("remove")
     p.add_argument("path")
+    p = sub.add_parser("copy")
+    p.add_argument("source")
+    p.add_argument("destination")
     p = sub.add_parser("prune")
     p.add_argument("path")
     p = sub.add_parser("manifest")
@@ -126,6 +146,8 @@ def main() -> int:
     ns = ap.parse_args()
     if ns.cmd == "remove":
         remove_tree(Path(ns.path))
+    elif ns.cmd == "copy":
+        copy_tree(Path(ns.source), Path(ns.destination))
     elif ns.cmd == "prune":
         prune(Path(ns.path))
     else:

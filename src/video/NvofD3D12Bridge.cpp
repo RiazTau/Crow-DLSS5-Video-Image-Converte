@@ -90,6 +90,7 @@ struct NvofD3D12Bridge::Impl {
     uint32_t gridWidth = 0;
     uint32_t gridHeight = 0;
     bool outputCostEnabled = true;
+    bool reliableMotionEnabled = true;
     bool shuttingDown = false;
     DXGI_FORMAT inputTextureFormat = DXGI_FORMAT_UNKNOWN;
     bool inputNeedsRgbaToBgraSwizzle = false;
@@ -105,15 +106,20 @@ struct NvofD3D12Bridge::Impl {
     ComPtr<ID3D12Resource> currentTexture;
     ComPtr<ID3D12Resource> previousTexture;
     ComPtr<ID3D12Resource> flowTexture;
+    ComPtr<ID3D12Resource> backwardFlowTexture;
     ComPtr<ID3D12Resource> costTexture;
+    ComPtr<ID3D12Resource> backwardCostTexture;
     NvOFGPUBufferHandle currentHandle = nullptr;
     NvOFGPUBufferHandle previousHandle = nullptr;
     NvOFGPUBufferHandle flowHandle = nullptr;
+    NvOFGPUBufferHandle backwardFlowHandle = nullptr;
     NvOFGPUBufferHandle costHandle = nullptr;
+    NvOFGPUBufferHandle backwardCostHandle = nullptr;
 
     Impl(D3D12Context& d, uint32_t w, uint32_t h, const NvofSettings& settings)
         : d3d(d), width(w), height(h), grid(settings.outputGridSize),
-          outputCostEnabled(settings.outputCost) {
+          outputCostEnabled(settings.outputCost),
+          reliableMotionEnabled(settings.reliability != NvofReliabilityMode::Off) {
         if (!width || !height || !d3d.Device() || !d3d.Queue()) {
             throw std::runtime_error("NVOF D3D12 bridge received an invalid D3D12 context/dimensions");
         }
@@ -164,7 +170,9 @@ struct NvofD3D12Bridge::Impl {
         // than to force an unsafe unregister sequence from a destructor.
         if (gpuIdle && handle) {
             const bool unregistered = Unregister(flowHandle) &&
+                                      Unregister(backwardFlowHandle) &&
                                       Unregister(costHandle) &&
+                                      Unregister(backwardCostHandle) &&
                                       Unregister(currentHandle) &&
                                       Unregister(previousHandle);
             if (!unregistered) {
@@ -175,7 +183,9 @@ struct NvofD3D12Bridge::Impl {
                 (void)currentTexture.Detach();
                 (void)previousTexture.Detach();
                 (void)flowTexture.Detach();
+                (void)backwardFlowTexture.Detach();
                 (void)costTexture.Detach();
+                (void)backwardCostTexture.Detach();
                 (void)syncFence.Detach();
                 fenceEvent = nullptr;
                 module = nullptr;
@@ -185,7 +195,9 @@ struct NvofD3D12Bridge::Impl {
             // The SDK programming guide explicitly frees client D3D12 resources after
             // unregistering them and before NvOFDestroy.
             flowTexture.Reset();
+            backwardFlowTexture.Reset();
             costTexture.Reset();
+            backwardCostTexture.Reset();
             currentTexture.Reset();
             previousTexture.Reset();
             currentUploadScratch.clear();
@@ -214,7 +226,9 @@ struct NvofD3D12Bridge::Impl {
             (void)currentTexture.Detach();
             (void)previousTexture.Detach();
             (void)flowTexture.Detach();
+            (void)backwardFlowTexture.Detach();
             (void)costTexture.Detach();
+            (void)backwardCostTexture.Detach();
             (void)syncFence.Detach();
             fenceEvent = nullptr;
             module = nullptr;
@@ -297,7 +311,10 @@ struct NvofD3D12Bridge::Impl {
         p.hPrivData = nullptr;
         p.disparityRange = NV_OF_STEREO_DISPARITY_RANGE_UNDEFINED;
         p.enableRoi = NV_OF_FALSE;
-        p.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
+        // Alpha2 asks the hardware for both directions in one Execute. The backward
+        // field is not sent to DLSS-G directly; it is used to reject periodic-texture
+        // phase locks before the forward field reaches frame generation.
+        p.predDirection = reliableMotionEnabled ? NV_OF_PRED_DIRECTION_BOTH : NV_OF_PRED_DIRECTION_FORWARD;
         p.enableGlobalFlow = NV_OF_FALSE;
         p.inputBufferFormat = NV_OF_BUFFER_FORMAT_ABGR8;
         Check("nvOFInit", api.nvOFInit(handle, &p));
@@ -409,14 +426,24 @@ struct NvofD3D12Bridge::Impl {
             previousUploadScratch.resize(bytes);
         }
         flowTexture = d3d.CreateTexture2D(flowFmt, gridWidth, gridHeight, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON);
+        if (reliableMotionEnabled) {
+            backwardFlowTexture = d3d.CreateTexture2D(flowFmt, gridWidth, gridHeight, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON);
+        }
         if (outputCostEnabled) {
             costTexture = d3d.CreateTexture2D(costFmt, gridWidth, gridHeight, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON);
+            if (reliableMotionEnabled) {
+                backwardCostTexture = d3d.CreateTexture2D(costFmt, gridWidth, gridHeight, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON);
+            }
         }
 
         currentHandle = Register(currentTexture.Get());
         previousHandle = Register(previousTexture.Get());
         flowHandle = Register(flowTexture.Get());
-        if (outputCostEnabled) costHandle = Register(costTexture.Get());
+        if (reliableMotionEnabled) backwardFlowHandle = Register(backwardFlowTexture.Get());
+        if (outputCostEnabled) {
+            costHandle = Register(costTexture.Get());
+            if (reliableMotionEnabled) backwardCostHandle = Register(backwardCostTexture.Get());
+        }
     }
 
     NvofNativeFrameResult Execute(const Rgba8Image& current, const Rgba8Image& previous, bool disableTemporalHints) {
@@ -479,8 +506,8 @@ struct NvofD3D12Bridge::Impl {
         NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{};
         out.outputBuffer = flowHandle;
         out.outputCostBuffer = outputCostEnabled ? costHandle : nullptr;
-        out.bwdOutputBuffer = nullptr;
-        out.bwdOutputCostBuffer = nullptr;
+        out.bwdOutputBuffer = reliableMotionEnabled ? backwardFlowHandle : nullptr;
+        out.bwdOutputCostBuffer = (reliableMotionEnabled && outputCostEnabled) ? backwardCostHandle : nullptr;
         out.globalFlowBuffer = nullptr;
         out.fencePoint = &outputDone;
 
@@ -489,23 +516,39 @@ struct NvofD3D12Bridge::Impl {
 
         const auto rawFlow = d3d.ReadbackTexture2D(flowTexture.Get(), 4u,
                                                    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON);
+        std::vector<uint8_t> rawBackwardFlow;
+        if (reliableMotionEnabled) {
+            rawBackwardFlow = d3d.ReadbackTexture2D(backwardFlowTexture.Get(), 4u,
+                                                    D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON);
+        }
         std::vector<uint8_t> rawCost;
+        std::vector<uint8_t> rawBackwardCost;
         if (outputCostEnabled) {
             rawCost = d3d.ReadbackTexture2D(costTexture.Get(), 1u,
                                             D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON);
+            if (reliableMotionEnabled) {
+                rawBackwardCost = d3d.ReadbackTexture2D(backwardCostTexture.Get(), 1u,
+                                                        D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON);
+            }
         }
         const size_t n = static_cast<size_t>(gridWidth) * gridHeight;
-        if (rawFlow.size() != n * 4u || (outputCostEnabled && rawCost.size() != n)) {
-            throw std::runtime_error("NVOF D3D12 readback size mismatch");
+        if (rawFlow.size() != n * 4u ||
+            (reliableMotionEnabled && rawBackwardFlow.size() != n * 4u) ||
+            (outputCostEnabled && rawCost.size() != n) ||
+            (reliableMotionEnabled && outputCostEnabled && rawBackwardCost.size() != n)) {
+            throw std::runtime_error("NVOF D3D12 forward/backward readback size mismatch");
         }
 
         NvofNativeFrameResult result;
         result.gridWidth = gridWidth;
         result.gridHeight = gridHeight;
         result.forward.resize(n);
+        if (reliableMotionEnabled) result.backward.resize(n);
         static_assert(sizeof(NvofPackedVector) == sizeof(NV_OF_FLOW_VECTOR));
         std::memcpy(result.forward.data(), rawFlow.data(), rawFlow.size());
+        if (reliableMotionEnabled) std::memcpy(result.backward.data(), rawBackwardFlow.data(), rawBackwardFlow.size());
         result.forwardCost = rawCost;
+        result.backwardCost = rawBackwardCost;
         return result;
     }
 };

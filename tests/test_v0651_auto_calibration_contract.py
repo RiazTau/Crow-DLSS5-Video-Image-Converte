@@ -10,7 +10,7 @@ dlg = (root / 'src/video/ExternalRenderDataDialog.cpp').read_text(encoding='utf-
 gui = (root / 'src/video/VideoGuiApp.cpp').read_text(encoding='utf-8')
 converter = (root / 'src/video/VideoConverter.cpp').read_text(encoding='utf-8')
 
-assert 'VERSION 0.6.5.1' in cmake or 'VERSION 0.6.5.2' in cmake or 'VERSION 0.6.5.3' in cmake or 'VERSION 0.6.6' in cmake
+assert 'VERSION 0.6.5.1' in cmake or 'VERSION 0.6.5.2' in cmake or 'VERSION 0.6.5.3' in cmake or 'VERSION 0.6.6' in cmake or 'VERSION 0.7.1' in cmake or 'VERSION 0.7.2' in cmake or 'VERSION 0.7.3' in cmake
 assert 'src/video/ExternalDataCalibration.cpp' in cmake
 
 # Depth auto-calibration: channel rejection/prior + global robust sequence range.

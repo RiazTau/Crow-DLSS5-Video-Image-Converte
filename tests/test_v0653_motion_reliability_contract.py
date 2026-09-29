@@ -5,7 +5,7 @@ cmake = (ROOT / 'CMakeLists.txt').read_text(encoding='utf-8')
 helper = (ROOT / 'auto_depth' / 'dis_flow_video.py').read_text(encoding='utf-8')
 readme = (ROOT / 'README.md').read_text(encoding='utf-8')
 
-assert 'VERSION 0.6.5.3' in cmake or 'VERSION 0.6.6' in cmake
+assert 'VERSION 0.6.5.3' in cmake or 'VERSION 0.6.6' in cmake or 'VERSION 0.7.1' in cmake or 'VERSION 0.7.2' in cmake or 'VERSION 0.7.3' in cmake
 assert 'make_dis(False)' in helper
 assert 'make_dis(True)' in helper
 assert 'needs_spatial_rescue' in helper

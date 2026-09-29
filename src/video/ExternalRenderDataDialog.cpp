@@ -27,7 +27,11 @@ enum : int {
     IDC_M_SCALE_X, IDC_M_SCALE_X_RESET, IDC_M_SCALE_Y, IDC_M_SCALE_Y_RESET,
     IDC_M_FLIP_X, IDC_M_FLIP_X_RESET, IDC_M_FLIP_Y, IDC_M_FLIP_Y_RESET,
     IDC_M_DIRECTION, IDC_M_DIRECTION_RESET, IDC_M_ANALYZE, IDC_M_RESULT,
-    IDC_ANALYZE_BOTH, IDC_NOTE, IDC_OK_BUTTON, IDC_CANCEL_BUTTON
+    IDC_ANALYZE_BOTH, IDC_NOTE, IDC_OK_BUTTON, IDC_CANCEL_BUTTON,
+    IDC_D_GROUP = 8300, IDC_D_LABEL_PATH, IDC_D_LABEL_SEQUENCE, IDC_D_LABEL_CHANNEL, IDC_D_LABEL_MAPPING,
+    IDC_D_LABEL_NEAR, IDC_D_LABEL_FAR,
+    IDC_M_GROUP, IDC_M_LABEL_PATH, IDC_M_LABEL_SEQUENCE, IDC_M_LABEL_X, IDC_M_LABEL_Y,
+    IDC_M_LABEL_SCALE_X, IDC_M_LABEL_SCALE_Y, IDC_M_LABEL_DIRECTION
 };
 
 struct DialogState {
@@ -36,6 +40,8 @@ struct DialogState {
     std::filesystem::path sourceVideo;
     video::ExternalRenderDataSettings working;
     bool accepted = false;
+    UINT dpi = 96;
+    HFONT uiFont = nullptr;
     std::vector<std::string> depthChannels;
     std::vector<std::string> motionChannels;
 };
@@ -67,6 +73,202 @@ void Label(HWND h, const wchar_t* text, int x, int y, int w, int hh = 22) {
     Make(h, L"STATIC", text, SS_LEFT, -1, x, y, w, hh);
 }
 
+
+UINT WindowDpi(HWND hwnd) {
+    using GetDpiForWindowFn = UINT (WINAPI*)(HWND);
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        if (auto fn = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(user32, "GetDpiForWindow"))) {
+            const UINT dpi = fn(hwnd);
+            if (dpi) return dpi;
+        }
+    }
+    return 96u;
+}
+
+int DpiScale(const DialogState* s, int logicalPx) {
+    return MulDiv(logicalPx, static_cast<int>((s && s->dpi) ? s->dpi : 96u), 96);
+}
+
+int MeasureTextWidth(HWND hwnd, HFONT font, const wchar_t* text) {
+    if (!hwnd || !text || !*text) return 0;
+    HDC dc = GetDC(hwnd);
+    if (!dc) return 0;
+    HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+    SIZE size{};
+    GetTextExtentPoint32W(dc, text, lstrlenW(text), &size);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(hwnd, dc);
+    return size.cx;
+}
+
+int ButtonWidth(DialogState* s, const wchar_t* text, int logicalMinimum) {
+    const int measured = MeasureTextWidth(s->hwnd, s->uiFont, text) + DpiScale(s, 24);
+    return std::max(DpiScale(s, logicalMinimum), measured);
+}
+
+void FitComboDropWidth(DialogState* s, int id) {
+    HWND combo = GetDlgItem(s->hwnd, id);
+    if (!combo) return;
+    const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    int widest = 0;
+    for (int i = 0; i < count; ++i) {
+        const int len = static_cast<int>(SendMessageW(combo, CB_GETLBTEXTLEN, i, 0));
+        if (len <= 0) continue;
+        std::wstring text(static_cast<size_t>(len) + 1u, L'\0');
+        SendMessageW(combo, CB_GETLBTEXT, i, reinterpret_cast<LPARAM>(text.data()));
+        text.resize(static_cast<size_t>(len));
+        widest = std::max(widest, MeasureTextWidth(combo, s->uiFont, text.c_str()));
+    }
+    RECT rc{}; GetWindowRect(combo, &rc);
+    const int currentWidth = static_cast<int>(rc.right - rc.left);
+    const int desiredWidth = widest + DpiScale(s, 42);
+    const int dropWidth = (std::max)(currentWidth, desiredWidth);
+    ::SendMessageW(combo, CB_SETDROPPEDWIDTH, static_cast<WPARAM>(dropWidth), 0);
+}
+
+void ApplyDialogFont(DialogState* s) {
+    if (!s || !s->hwnd) return;
+    if (s->uiFont) { DeleteObject(s->uiFont); s->uiFont = nullptr; }
+    const int height = -MulDiv(9, static_cast<int>(s->dpi ? s->dpi : 96u), 72);
+    s->uiFont = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT font = s->uiFont ? s->uiFont : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    for (HWND c = GetWindow(s->hwnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+        SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    for (int id : {IDC_D_CHANNEL, IDC_D_MAPPING, IDC_M_X, IDC_M_Y, IDC_M_DIRECTION}) FitComboDropWidth(s, id);
+}
+
+void MoveCtl(DialogState* s, int id, int x, int y, int w, int h) {
+    if (HWND ctl = GetDlgItem(s->hwnd, id))
+        MoveWindow(ctl, x, y, std::max(1, w), std::max(1, h), TRUE);
+}
+
+void LayoutDialog(DialogState* s) {
+    if (!s || !s->hwnd) return;
+    RECT rc{}; GetClientRect(s->hwnd, &rc);
+    const int W = std::max(1, static_cast<int>(rc.right - rc.left));
+    const int H = std::max(1, static_cast<int>(rc.bottom - rc.top));
+    const int m = DpiScale(s, 12), inner = DpiScale(s, 14), gap = DpiScale(s, 8);
+    const int row = DpiScale(s, 26), labelW = DpiScale(s, 104);
+    const int groupW = std::max(DpiScale(s, 760), W - 2 * m);
+    const int left = m + inner, right = m + groupW - inner;
+    const int valueX = left + labelW;
+
+    const int depthY = DpiScale(s, 10), depthH = DpiScale(s, 228);
+    MoveCtl(s, IDC_D_GROUP, m, depthY, groupW, depthH);
+    int y = depthY + DpiScale(s, 26);
+    const int browseW = ButtonWidth(s, L"Browse...", 100);
+    MoveCtl(s, IDC_D_LABEL_PATH, left, y + DpiScale(s, 3), labelW - gap, row);
+    MoveCtl(s, IDC_D_BROWSE, right - browseW, y, browseW, row);
+    MoveCtl(s, IDC_D_PATH, valueX, y, std::max(DpiScale(s, 160), right - browseW - gap - valueX), row);
+    y += DpiScale(s, 32);
+    MoveCtl(s, IDC_D_LABEL_SEQUENCE, left, y + DpiScale(s, 3), labelW - gap, row);
+    MoveCtl(s, IDC_D_SEQUENCE, valueX, y + DpiScale(s, 2), std::max(DpiScale(s, 200), right - valueX), row);
+    y += DpiScale(s, 30);
+
+    const int resetW = ButtonWidth(s, L"Reset", 64);
+    const int analyzeW = ButtonWidth(s, L"Auto Calibrate", 112);
+    const int quickW = ButtonWidth(s, L"Quick Auto", 88);
+    int bx = right;
+    bx -= resetW; MoveCtl(s, IDC_D_CHANNEL_RESET, bx, y, resetW, row); bx -= gap;
+    bx -= analyzeW; MoveCtl(s, IDC_D_ANALYZE, bx, y, analyzeW, row); bx -= gap;
+    bx -= quickW; MoveCtl(s, IDC_D_AUTO_CHANNEL, bx, y, quickW, row); bx -= gap;
+    MoveCtl(s, IDC_D_LABEL_CHANNEL, left, y + DpiScale(s, 3), labelW - gap, row);
+    MoveCtl(s, IDC_D_CHANNEL, valueX, y, std::max(DpiScale(s, 180), bx - valueX), DpiScale(s, 210));
+    y += DpiScale(s, 32);
+
+    MoveCtl(s, IDC_D_LABEL_MAPPING, left, y + DpiScale(s, 3), DpiScale(s, 72), row);
+    const int mappingX = left + DpiScale(s, 76);
+    const int mappingW = DpiScale(s, 190);
+    MoveCtl(s, IDC_D_MAPPING, mappingX, y, mappingW, DpiScale(s, 120));
+    MoveCtl(s, IDC_D_MAPPING_RESET, mappingX + mappingW + gap, y, resetW, row);
+    int nx = mappingX + mappingW + gap + resetW + DpiScale(s, 20);
+    MoveCtl(s, IDC_D_LABEL_NEAR, nx, y + DpiScale(s, 3), DpiScale(s, 42), row); nx += DpiScale(s, 44);
+    const int numberW = DpiScale(s, 88);
+    MoveCtl(s, IDC_D_NEAR, nx, y, numberW, row); nx += numberW + gap;
+    MoveCtl(s, IDC_D_NEAR_RESET, nx, y, resetW, row); nx += resetW + DpiScale(s, 18);
+    MoveCtl(s, IDC_D_LABEL_FAR, nx, y + DpiScale(s, 3), DpiScale(s, 34), row); nx += DpiScale(s, 36);
+    MoveCtl(s, IDC_D_FAR, nx, y, std::max(DpiScale(s, 72), right - nx - resetW - gap), row);
+    MoveCtl(s, IDC_D_FAR_RESET, right - resetW, y, resetW, row);
+    y += DpiScale(s, 32);
+
+    const int invertedW = std::min(right - valueX - resetW - gap,
+        MeasureTextWidth(s->hwnd, s->uiFont, L"Near = white / DLSSNR DepthInverted") + DpiScale(s, 30));
+    MoveCtl(s, IDC_D_INVERTED, valueX, y, std::max(DpiScale(s, 260), invertedW), row);
+    MoveCtl(s, IDC_D_INVERTED_RESET, valueX + std::max(DpiScale(s, 260), invertedW) + gap, y, resetW, row);
+    y += DpiScale(s, 31);
+    MoveCtl(s, IDC_D_RESULT, left, y, right - left, DpiScale(s, 38));
+
+    const int motionY = depthY + depthH + DpiScale(s, 10), motionH = DpiScale(s, 336);
+    MoveCtl(s, IDC_M_GROUP, m, motionY, groupW, motionH);
+    y = motionY + DpiScale(s, 26);
+    MoveCtl(s, IDC_M_LABEL_PATH, left, y + DpiScale(s, 3), labelW - gap, row);
+    MoveCtl(s, IDC_M_BROWSE, right - browseW, y, browseW, row);
+    MoveCtl(s, IDC_M_PATH, valueX, y, std::max(DpiScale(s, 160), right - browseW - gap - valueX), row);
+    y += DpiScale(s, 32);
+    MoveCtl(s, IDC_M_LABEL_SEQUENCE, left, y + DpiScale(s, 3), labelW - gap, row);
+    MoveCtl(s, IDC_M_SEQUENCE, valueX, y + DpiScale(s, 2), std::max(DpiScale(s, 200), right - valueX), row);
+    y += DpiScale(s, 30);
+
+    const int motionAnalyzeW = ButtonWidth(s, L"Auto Calibrate", 112);
+    const int motionResetW = resetW, motionQuickW = quickW;
+    const int motionRight = right - motionAnalyzeW - gap;
+    auto motionRow = [&](int labelId, int comboId, int quickId, int resetId, int yy) {
+        MoveCtl(s, labelId, left, yy + DpiScale(s, 3), labelW - gap, row);
+        int r = motionRight;
+        r -= motionResetW; MoveCtl(s, resetId, r, yy, motionResetW, row); r -= gap;
+        r -= motionQuickW; MoveCtl(s, quickId, r, yy, motionQuickW, row); r -= gap;
+        MoveCtl(s, comboId, valueX, yy, std::max(DpiScale(s, 210), r - valueX), DpiScale(s, 210));
+    };
+    motionRow(IDC_M_LABEL_X, IDC_M_X, IDC_M_X_AUTO, IDC_M_X_RESET, y);
+    MoveCtl(s, IDC_M_ANALYZE, right - motionAnalyzeW, y, motionAnalyzeW, row * 2 + DpiScale(s, 6));
+    y += DpiScale(s, 32);
+    motionRow(IDC_M_LABEL_Y, IDC_M_Y, IDC_M_Y_AUTO, IDC_M_Y_RESET, y);
+    y += DpiScale(s, 34);
+
+    const int half = (right - left - gap) / 2;
+    const int editW = DpiScale(s, 92), smallLabel = DpiScale(s, 66), smallReset = ButtonWidth(s, L"Reset", 58);
+    int x1 = left;
+    MoveCtl(s, IDC_M_LABEL_SCALE_X, x1, y + DpiScale(s, 3), smallLabel, row); x1 += smallLabel;
+    MoveCtl(s, IDC_M_SCALE_X, x1, y, editW, row); x1 += editW + gap;
+    MoveCtl(s, IDC_M_SCALE_X_RESET, x1, y, smallReset, row);
+    int x2 = left + half + gap;
+    MoveCtl(s, IDC_M_LABEL_SCALE_Y, x2, y + DpiScale(s, 3), smallLabel, row); x2 += smallLabel;
+    MoveCtl(s, IDC_M_SCALE_Y, x2, y, editW, row); x2 += editW + gap;
+    MoveCtl(s, IDC_M_SCALE_Y_RESET, x2, y, smallReset, row);
+    y += DpiScale(s, 34);
+
+    const int flipYW = ButtonWidth(s, L"Flip Y", 90), flipXW = ButtonWidth(s, L"Flip X", 90);
+    const int flipBlockW = flipXW + gap + smallReset;
+    MoveCtl(s, IDC_M_FLIP_X, left, y, flipXW, row);
+    MoveCtl(s, IDC_M_FLIP_X_RESET, left + flipXW + gap, y, smallReset, row);
+    const int flipYx = left + std::max(DpiScale(s, 240), flipBlockW + DpiScale(s, 40));
+    MoveCtl(s, IDC_M_FLIP_Y, flipYx, y, flipYW, row);
+    MoveCtl(s, IDC_M_FLIP_Y_RESET, flipYx + flipYW + gap, y, smallReset, row);
+    y += DpiScale(s, 34);
+
+    MoveCtl(s, IDC_M_LABEL_DIRECTION, left, y + DpiScale(s, 3), labelW - gap, row);
+    MoveCtl(s, IDC_M_DIRECTION_RESET, right - resetW, y, resetW, row);
+    MoveCtl(s, IDC_M_DIRECTION, valueX, y, std::max(DpiScale(s, 280), right - resetW - gap - valueX), DpiScale(s, 120));
+    y += DpiScale(s, 34);
+    MoveCtl(s, IDC_M_RESULT, left, y, right - left, DpiScale(s, 50));
+
+    const int footerTop = motionY + motionH + DpiScale(s, 10);
+    const int buttonH = DpiScale(s, 32);
+    const int bothW = ButtonWidth(s, L"Auto Calibrate Both", 160);
+    MoveCtl(s, IDC_ANALYZE_BOTH, m + DpiScale(s, 6), footerTop, bothW, buttonH);
+    const int okW = ButtonWidth(s, L"OK", 88), cancelW = ButtonWidth(s, L"Cancel", 92);
+    const int footerRight = W - m - DpiScale(s, 6);
+    MoveCtl(s, IDC_CANCEL_BUTTON, footerRight - cancelW, footerTop + DpiScale(s, 62), cancelW, buttonH);
+    MoveCtl(s, IDC_OK_BUTTON, footerRight - cancelW - gap - okW, footerTop + DpiScale(s, 62), okW, buttonH);
+    const int noteX = m + DpiScale(s, 6) + bothW + gap;
+    MoveCtl(s, IDC_NOTE, noteX, footerTop, std::max(DpiScale(s, 300), footerRight - noteX), DpiScale(s, 58));
+
+    for (int id : {IDC_D_CHANNEL, IDC_D_MAPPING, IDC_M_X, IDC_M_Y, IDC_M_DIRECTION}) FitComboDropWidth(s, id);
+    (void)H;
+}
+
 std::wstring Text(HWND h, int id) {
     HWND c = GetDlgItem(h, id);
     const int n = GetWindowTextLengthW(c);
@@ -88,6 +290,8 @@ void FillCombo(HWND h, int id, const std::vector<std::string>& values, const std
     }
     if (sel < 0 && !values.empty()) sel = 0;
     SendMessageW(c, CB_SETCURSEL, sel, 0);
+    if (auto* state = reinterpret_cast<DialogState*>(GetWindowLongPtrW(h, GWLP_USERDATA)))
+        FitComboDropWidth(state, id);
 }
 
 std::string ComboValue(HWND h, int id) {
@@ -327,53 +531,72 @@ void ApplyMotionCalibration(DialogState* s) {
 
 void CreateControls(DialogState* s) {
     HWND h = s->hwnd;
-    Make(h, L"BUTTON", L"External Depth EXR Sequence", BS_GROUPBOX, -1, 12, 10, 770, 220);
-    Label(h, L"First frame", 26, 36, 84); Make(h, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | ES_READONLY, IDC_D_PATH, 112, 34, 540, 24);
-    Make(h, L"BUTTON", L"Browse...", BS_PUSHBUTTON, IDC_D_BROWSE, 662, 34, 102, 24);
-    Label(h, L"Sequence", 26, 66, 84); Make(h, L"STATIC", L"Not selected", SS_LEFT, IDC_D_SEQUENCE, 112, 66, 652, 22);
-    Label(h, L"Channel", 26, 94, 84); Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_D_CHANNEL, 112, 90, 370, 180);
-    Make(h, L"BUTTON", L"Quick Auto", BS_PUSHBUTTON, IDC_D_AUTO_CHANNEL, 490, 90, 82, 24);
-    Make(h, L"BUTTON", L"Auto Calibrate", BS_PUSHBUTTON, IDC_D_ANALYZE, 580, 90, 104, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_CHANNEL_RESET, 692, 90, 72, 24);
-    Label(h, L"Mapping", 26, 124, 84); Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST, IDC_D_MAPPING, 112, 120, 175, 90);
+    Make(h, L"BUTTON", L"External Depth EXR Sequence", BS_GROUPBOX, IDC_D_GROUP, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"First frame", SS_LEFT, IDC_D_LABEL_PATH, 0, 0, 10, 10);
+    Make(h, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | ES_READONLY, IDC_D_PATH, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Browse...", BS_PUSHBUTTON, IDC_D_BROWSE, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Sequence", SS_LEFT, IDC_D_LABEL_SEQUENCE, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Not selected", SS_LEFT | SS_PATHELLIPSIS, IDC_D_SEQUENCE, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Channel", SS_LEFT, IDC_D_LABEL_CHANNEL, 0, 0, 10, 10);
+    Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_D_CHANNEL, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Quick Auto", BS_PUSHBUTTON, IDC_D_AUTO_CHANNEL, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Auto Calibrate", BS_PUSHBUTTON, IDC_D_ANALYZE, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_CHANNEL_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Mapping", SS_LEFT, IDC_D_LABEL_MAPPING, 0, 0, 10, 10);
+    Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST, IDC_D_MAPPING, 0, 0, 10, 10);
     SendMessageW(GetDlgItem(h, IDC_D_MAPPING), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Fixed Near/Far"));
     SendMessageW(GetDlgItem(h, IDC_D_MAPPING), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Raw 0..1"));
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_MAPPING_RESET, 294, 120, 60, 24);
-    Label(h, L"Near", 366, 124, 44); Make(h, L"EDIT", L"0.1", WS_BORDER | ES_AUTOHSCROLL, IDC_D_NEAR, 412, 120, 90, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_NEAR_RESET, 508, 120, 60, 24);
-    Label(h, L"Far", 580, 124, 34); Make(h, L"EDIT", L"100", WS_BORDER | ES_AUTOHSCROLL, IDC_D_FAR, 616, 120, 76, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_FAR_RESET, 700, 120, 64, 24);
-    Make(h, L"BUTTON", L"Near = white / DLSSNR DepthInverted", BS_AUTOCHECKBOX, IDC_D_INVERTED, 112, 154, 300, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_INVERTED_RESET, 420, 154, 60, 24);
-    Make(h, L"STATIC", L"Not calibrated", SS_LEFT, IDC_D_RESULT, 26, 184, 738, 34);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_MAPPING_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Near", SS_LEFT, IDC_D_LABEL_NEAR, 0, 0, 10, 10);
+    Make(h, L"EDIT", L"0.1", WS_BORDER | ES_AUTOHSCROLL, IDC_D_NEAR, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_NEAR_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Far", SS_LEFT, IDC_D_LABEL_FAR, 0, 0, 10, 10);
+    Make(h, L"EDIT", L"100", WS_BORDER | ES_AUTOHSCROLL, IDC_D_FAR, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_FAR_RESET, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Near = white / DLSSNR DepthInverted", BS_AUTOCHECKBOX, IDC_D_INVERTED, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_D_INVERTED_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Not calibrated", SS_LEFT | SS_EDITCONTROL, IDC_D_RESULT, 0, 0, 10, 10);
 
-    Make(h, L"BUTTON", L"External Motion EXR Sequence", BS_GROUPBOX, -1, 12, 238, 770, 278);
-    Label(h, L"First frame", 26, 264, 84); Make(h, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | ES_READONLY, IDC_M_PATH, 112, 262, 540, 24);
-    Make(h, L"BUTTON", L"Browse...", BS_PUSHBUTTON, IDC_M_BROWSE, 662, 262, 102, 24);
-    Label(h, L"Sequence", 26, 294, 84); Make(h, L"STATIC", L"Not selected", SS_LEFT, IDC_M_SEQUENCE, 112, 294, 652, 22);
-    Label(h, L"Motion X", 26, 322, 84); Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_M_X, 112, 318, 380, 180);
-    Make(h, L"BUTTON", L"Quick Auto", BS_PUSHBUTTON, IDC_M_X_AUTO, 500, 318, 82, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_X_RESET, 590, 318, 70, 24);
-    Make(h, L"BUTTON", L"Auto Calibrate", BS_PUSHBUTTON, IDC_M_ANALYZE, 668, 318, 96, 54);
-    Label(h, L"Motion Y", 26, 352, 84); Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_M_Y, 112, 348, 380, 180);
-    Make(h, L"BUTTON", L"Quick Auto", BS_PUSHBUTTON, IDC_M_Y_AUTO, 500, 348, 82, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_Y_RESET, 590, 348, 70, 24);
-    Label(h, L"Scale X", 26, 384, 62); Make(h, L"EDIT", L"1.0", WS_BORDER | ES_AUTOHSCROLL, IDC_M_SCALE_X, 90, 380, 86, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_SCALE_X_RESET, 182, 380, 56, 24);
-    Label(h, L"Scale Y", 250, 384, 62); Make(h, L"EDIT", L"1.0", WS_BORDER | ES_AUTOHSCROLL, IDC_M_SCALE_Y, 314, 380, 86, 24);
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_SCALE_Y_RESET, 406, 380, 56, 24);
-    Make(h, L"BUTTON", L"Flip X", BS_AUTOCHECKBOX, IDC_M_FLIP_X, 480, 380, 70, 24); Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_FLIP_X_RESET, 552, 380, 54, 24);
-    Make(h, L"BUTTON", L"Flip Y", BS_AUTOCHECKBOX, IDC_M_FLIP_Y, 614, 380, 70, 24); Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_FLIP_Y_RESET, 690, 380, 54, 24);
-    Label(h, L"Direction", 26, 418, 70); Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST, IDC_M_DIRECTION, 98, 414, 228, 90);
+    Make(h, L"BUTTON", L"External Motion EXR Sequence", BS_GROUPBOX, IDC_M_GROUP, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"First frame", SS_LEFT, IDC_M_LABEL_PATH, 0, 0, 10, 10);
+    Make(h, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | ES_READONLY, IDC_M_PATH, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Browse...", BS_PUSHBUTTON, IDC_M_BROWSE, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Sequence", SS_LEFT, IDC_M_LABEL_SEQUENCE, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Not selected", SS_LEFT | SS_PATHELLIPSIS, IDC_M_SEQUENCE, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Motion X", SS_LEFT, IDC_M_LABEL_X, 0, 0, 10, 10);
+    Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_M_X, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Quick Auto", BS_PUSHBUTTON, IDC_M_X_AUTO, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_X_RESET, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Auto Calibrate", BS_PUSHBUTTON, IDC_M_ANALYZE, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Motion Y", SS_LEFT, IDC_M_LABEL_Y, 0, 0, 10, 10);
+    Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, IDC_M_Y, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Quick Auto", BS_PUSHBUTTON, IDC_M_Y_AUTO, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_Y_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Scale X", SS_LEFT, IDC_M_LABEL_SCALE_X, 0, 0, 10, 10);
+    Make(h, L"EDIT", L"1.0", WS_BORDER | ES_AUTOHSCROLL, IDC_M_SCALE_X, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_SCALE_X_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Scale Y", SS_LEFT, IDC_M_LABEL_SCALE_Y, 0, 0, 10, 10);
+    Make(h, L"EDIT", L"1.0", WS_BORDER | ES_AUTOHSCROLL, IDC_M_SCALE_Y, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_SCALE_Y_RESET, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Flip X", BS_AUTOCHECKBOX, IDC_M_FLIP_X, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_FLIP_X_RESET, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Flip Y", BS_AUTOCHECKBOX, IDC_M_FLIP_Y, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_FLIP_Y_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Direction", SS_LEFT, IDC_M_LABEL_DIRECTION, 0, 0, 10, 10);
+    Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST, IDC_M_DIRECTION, 0, 0, 10, 10);
     SendMessageW(GetDlgItem(h, IDC_M_DIRECTION), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Current -> Previous (native)"));
     SendMessageW(GetDlgItem(h, IDC_M_DIRECTION), CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Previous -> Current (invert)"));
-    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_DIRECTION_RESET, 334, 414, 60, 24);
-    Make(h, L"STATIC", L"Not calibrated", SS_LEFT, IDC_M_RESULT, 26, 450, 738, 52);
+    Make(h, L"BUTTON", L"Reset", BS_PUSHBUTTON, IDC_M_DIRECTION_RESET, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Not calibrated", SS_LEFT | SS_EDITCONTROL, IDC_M_RESULT, 0, 0, 10, 10);
 
-    Make(h, L"BUTTON", L"Auto Calibrate Both", BS_PUSHBUTTON, IDC_ANALYZE_BOTH, 18, 528, 150, 30);
-    Make(h, L"STATIC", L"V0.6.5.1 Auto Calibration: Depth uses multi-frame global robust statistics. Motion tests channel pair, XY/sign, pixel/UV/NDC scale and current/previous direction against real adjacent video frames. LOW confidence results remain editable.", SS_LEFT, IDC_NOTE, 180, 526, 584, 54);
-    Make(h, L"BUTTON", L"OK", BS_DEFPUSHBUTTON, IDC_OK_BUTTON, 580, 590, 86, 30);
-    Make(h, L"BUTTON", L"Cancel", BS_PUSHBUTTON, IDC_CANCEL_BUTTON, 678, 590, 86, 30);
+    Make(h, L"BUTTON", L"Auto Calibrate Both", BS_PUSHBUTTON, IDC_ANALYZE_BOTH, 0, 0, 10, 10);
+    Make(h, L"STATIC", L"Auto Calibration: Depth uses multi-frame global robust statistics. Motion tests channel pair, XY/sign, pixel/UV/NDC scale and current/previous direction against real adjacent video frames. LOW confidence results remain editable.", SS_LEFT | SS_EDITCONTROL, IDC_NOTE, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"OK", BS_DEFPUSHBUTTON, IDC_OK_BUTTON, 0, 0, 10, 10);
+    Make(h, L"BUTTON", L"Cancel", BS_PUSHBUTTON, IDC_CANCEL_BUTTON, 0, 0, 10, 10);
+
+    s->dpi = WindowDpi(h);
+    ApplyDialogFont(s);
+    LayoutDialog(s);
 
     SetText(h, IDC_D_PATH, s->working.depth.firstFrame.wstring());
     SetText(h, IDC_M_PATH, s->working.motion.firstFrame.wstring());
@@ -391,9 +614,7 @@ void CreateControls(DialogState* s) {
     if (!s->working.depth.firstFrame.empty() && std::filesystem::exists(s->working.depth.firstFrame)) LoadDepthProbe(s, false);
     if (!s->working.motion.firstFrame.empty() && std::filesystem::exists(s->working.motion.firstFrame)) LoadMotionProbe(s, false);
     SyncDepthMapping(s);
-
-    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    LayoutDialog(s);
 }
 
 bool Commit(DialogState* s) {
@@ -430,6 +651,23 @@ LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
     case WM_CREATE: CreateControls(s); return 0;
+    case WM_SIZE: if (s) { LayoutDialog(s); return 0; } break;
+    case WM_DPICHANGED: if (s) {
+        s->dpi = HIWORD(wp);
+        ApplyDialogFont(s);
+        const auto* suggested = reinterpret_cast<const RECT*>(lp);
+        if (suggested) SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+            suggested->right - suggested->left, suggested->bottom - suggested->top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        LayoutDialog(s);
+        return 0;
+    } break;
+    case WM_GETMINMAXINFO: if (s) {
+        auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
+        mm->ptMinTrackSize.x = DpiScale(s, 980);
+        mm->ptMinTrackSize.y = DpiScale(s, 760);
+        return 0;
+    } break;
     case WM_COMMAND: if (s) {
         switch (LOWORD(wp)) {
         case IDC_D_BROWSE: if (auto p = PickExr(hwnd)) { s->working.depth.firstFrame = *p; SetText(hwnd, IDC_D_PATH, p->wstring()); SetText(hwnd, IDC_D_RESULT, L"Not calibrated"); LoadDepthProbe(s, true); } return 0;
@@ -458,6 +696,7 @@ LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
     } break;
     case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_NCDESTROY: if (s && s->uiFont) { DeleteObject(s->uiFont); s->uiFont = nullptr; } break;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -478,8 +717,11 @@ bool EditExternalRenderDataSettings(HWND parent,
     }
     DialogState state; state.parent = parent; state.working = settings; state.sourceVideo = sourceVideo;
     EnableWindow(parent, FALSE);
-    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, L"V0.6.6-alpha2 External Render Data Auto Calibration",
-        WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, 810, 670,
+    const UINT parentDpi = WindowDpi(parent);
+    const int initialW = MulDiv(1040, static_cast<int>(parentDpi), 96);
+    const int initialH = MulDiv(800, static_cast<int>(parentDpi), 96);
+    HWND h = CreateWindowExW(WS_EX_DLGMODALFRAME, kClassName, L"Crow - DLSS Rendering Tool External Render Data Auto Calibration",
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_THICKFRAME | WS_MAXIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, initialW, initialH,
         parent, nullptr, inst, &state);
     if (!h) { EnableWindow(parent, TRUE); return false; }
     ShowWindow(h, SW_SHOW); UpdateWindow(h);

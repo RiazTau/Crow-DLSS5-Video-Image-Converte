@@ -26,7 +26,8 @@ struct DlssNrSettings {
 class DlssNrRunner {
 public:
     DlssNrRunner(D3D12Context& d3d, std::filesystem::path runtimeDll, DlssNrSettings settings,
-                 std::optional<RuntimeCallerMode> callerModeOverride = std::nullopt);
+                 std::optional<RuntimeCallerMode> callerModeOverride = std::nullopt,
+                 bool manageCoreLifetime = true);
     ~DlssNrRunner();
     DlssNrRunner(const DlssNrRunner&) = delete;
     DlssNrRunner& operator=(const DlssNrRunner&) = delete;
@@ -75,6 +76,7 @@ private:
     HMODULE _snippetModule = nullptr;
     SnippetCallerCompat _callerCompat;
     bool _coreInitialized = false;
+    bool _manageCoreLifetime = true;
     bool _snippetInitialized = false;
     bool _performanceBatching = true;
     std::unique_ptr<Resources> _resources;

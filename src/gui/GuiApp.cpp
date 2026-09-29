@@ -1,4 +1,4 @@
-#include "GuiApp.h"
+﻿#include "GuiApp.h"
 #include "../AppPaths.h"
 #include "../AutoDepthRunner.h"
 #include "../D3D12Context.h"
@@ -63,6 +63,7 @@ enum ControlId : int {
     IDC_AUTO_MASK,
     IDC_UI_CORRECTION,
     IDC_ITERATIONS,
+    IDC_DLSS_OVERLAY_COUNT,
     IDC_RUNTIME_PATH,
     IDC_RUNTIME_BROWSE,
     IDC_SAVE_PARAMETERS,
@@ -89,6 +90,7 @@ enum ControlId : int {
     IDC_LBL_LOCAL_STRUCTURE,
     IDC_LBL_SKIN_STRUCTURE,
     IDC_LBL_ITERATIONS,
+    IDC_LBL_DLSS_OVERLAY_COUNT,
 };
 
 
@@ -123,6 +125,7 @@ static constexpr ImageParameterSpec kImageParameterSpecs[] = {
     {IDC_AUTO_MASK, ImageParameterKind::Check, L"nr_auto_skin_mask", L"1"},
     {IDC_UI_CORRECTION, ImageParameterKind::Check, L"nr_ui_correction", L"1"},
     {IDC_ITERATIONS, ImageParameterKind::Combo, L"iterations", L"0", 4},
+    {IDC_DLSS_OVERLAY_COUNT, ImageParameterKind::Combo, L"recursive_dlss5_pass_count", L"0", 7},
 };
 
 constexpr int IMAGE_RESET_BUTTON_BASE = 6000;
@@ -488,6 +491,12 @@ DlssNrSettings ReadDlssSettings(State* s) {
     static const uint32_t its[] = {1, 2, 4, 8, 16};
     v.iterations = its[std::clamp(itSel, 0, 4)];
     return v;
+}
+
+uint32_t ReadDlssOverlayPassCount(State* s) {
+    const int selection = static_cast<int>(SendMessageW(GetDlgItem(s->hwnd, IDC_DLSS_OVERLAY_COUNT), CB_GETCURSEL, 0, 0));
+    static constexpr uint32_t kPassCounts[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    return kPassCounts[std::clamp(selection == CB_ERR ? 0 : selection, 0, 7)];
 }
 
 void PopulateExrLayers(HWND combo, const std::filesystem::path& path, bool preferCombined) {
@@ -975,6 +984,8 @@ void CreateControls(State* s) {
     Make(h, L"BUTTON", L"UI Correction", BS_AUTOCHECKBOX, IDC_UI_CORRECTION); Button_SetCheck(GetDlgItem(h, IDC_UI_CORRECTION), BST_CHECKED);
     Label(h, L"Iterations", IDC_LBL_ITERATIONS); Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST, IDC_ITERATIONS);
     ComboReset(GetDlgItem(h, IDC_ITERATIONS), {L"1",L"2",L"4",L"8",L"16"}, 0);
+    Label(h, L"DLSS5 Passes", IDC_LBL_DLSS_OVERLAY_COUNT); Make(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST, IDC_DLSS_OVERLAY_COUNT);
+    ComboReset(GetDlgItem(h, IDC_DLSS_OVERLAY_COUNT), {L"1",L"2",L"3",L"4",L"5",L"6",L"7",L"8"}, 0);
     Make(h, L"EDIT", s->runtimePath.wstring().c_str(), WS_BORDER | ES_AUTOHSCROLL | ES_READONLY, IDC_RUNTIME_PATH);
     Make(h, L"BUTTON", L"Runtime DLL...", BS_PUSHBUTTON, IDC_RUNTIME_BROWSE);
     Make(h, L"BUTTON", L"Save Parameters", BS_PUSHBUTTON, IDC_SAVE_PARAMETERS);
@@ -1087,6 +1098,7 @@ void Layout(State* s) {
     }
     y+=28;
     standardCombo(IDC_ITERATIONS,IDC_LBL_ITERATIONS,y,180); y+=30;
+    standardCombo(IDC_DLSS_OVERLAY_COUNT,IDC_LBL_DLSS_OVERLAY_COUNT,y,200); y+=30;
     MoveCtrl(s->hwnd,IDC_RUNTIME_PATH,x0,y,w-112,rowH); MoveCtrl(s->hwnd,IDC_RUNTIME_BROWSE,x0+w-106,y,106,rowH); y+=32;
     MoveCtrl(s->hwnd,IDC_SAVE_PARAMETERS,x0,y,w,rowH); y+=32;
     MoveCtrl(s->hwnd,IDC_PROCESS,x0,y,(w-8)/2,32); MoveCtrl(s->hwnd,IDC_SAVE,x0+(w+8)/2,y,(w-8)/2,32); y+=39;
@@ -1196,6 +1208,7 @@ void StartProcessing(State* s) {
     const int depthMode = CurrentDepthMode(s);
     auto dlss = ReadDlssSettings(s);
     dlss.depthInverted = depthMode == 1 ? true : depthSettings.inverseDepth;
+    const uint32_t dlssOverlayPassCount = ReadDlssOverlayPassCount(s);
     s->neuralUplift = Button_GetCheck(GetDlgItem(s->hwnd,IDC_NEURAL_UPLIFT))==BST_CHECKED;
     const bool enabled=s->neuralUplift;
     const auto runtime=s->runtimePath;
@@ -1203,7 +1216,7 @@ void StartProcessing(State* s) {
     SetBusy(s, true);
     SetStatus(s, depthMode == 1 ? L"Generating Auto Depth, then processing DLSS5..." : L"Processing DLSS5...");
     if(s->worker.joinable()) s->worker.join();
-    s->worker=std::thread([s,input,depthPath,depthSettings,depthMode,dlss,runtime,enabled]() mutable {
+    s->worker=std::thread([s,input,depthPath,depthSettings,depthMode,dlss,runtime,enabled,dlssOverlayPassCount]() mutable {
         Rgba8Image result;
         DepthMap depthResult;
         bool hasDepth = false;
@@ -1221,7 +1234,10 @@ void StartProcessing(State* s) {
             else {
                 D3D12Context d3d;
                 DlssNrRunner runner(d3d,runtime,dlss);
-                result=runner.Process(input,depth?&depth->values:nullptr);
+                result = input;
+                for (uint32_t passIndex = 0; passIndex < dlssOverlayPassCount; ++passIndex) {
+                    result = runner.Process(result, depth ? &depth->values : nullptr);
+                }
             }
         } catch(const std::exception& e){ error=e.what(); }
         {
@@ -1277,7 +1293,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
         mmi->ptMinTrackSize.x = 1120;
-        mmi->ptMinTrackSize.y = 920;
+        mmi->ptMinTrackSize.y = 980;
         return 0;
     }
     case WM_CREATE: CreateControls(s); Layout(s); UpdateDepthModeUi(s); return 0;
@@ -1349,7 +1365,7 @@ int RunGuiApp(void* instanceRaw, int showCommand) {
     WNDCLASSEXW dc{sizeof(dc)};dc.style=CS_HREDRAW|CS_VREDRAW|CS_DBLCLKS;dc.hInstance=instance;dc.lpfnWndProc=DepthPreviewProc;dc.lpszClassName=DEPTH_PREVIEW_CLASS;dc.hCursor=LoadCursor(nullptr,IDC_ARROW);dc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);RegisterClassExW(&dc);
     WNDCLASSEXW wc{sizeof(wc)};wc.hInstance=instance;wc.lpfnWndProc=MainProc;wc.lpszClassName=MAIN_CLASS;wc.hCursor=LoadCursor(nullptr,IDC_ARROW);wc.hIcon=LoadIcon(nullptr,IDI_APPLICATION);wc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);RegisterClassExW(&wc);
     State state;
-    HWND hwnd=CreateWindowExW(0,MAIN_CLASS,L"Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
+    HWND hwnd=CreateWindowExW(0,MAIN_CLASS,L"Crow - DLSS Rendering Tool V0.7.3-alpha1",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
         CW_USEDEFAULT,CW_USEDEFAULT,1580,980,nullptr,nullptr,instance,&state);
     if(!hwnd)return 1;
     ShowWindow(hwnd,showCommand);UpdateWindow(hwnd);

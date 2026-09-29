@@ -1,0 +1,8 @@
+numpy
+scipy
+huggingface-hub
+safetensors
+matplotlib
+h5py
+tqdm
+einops

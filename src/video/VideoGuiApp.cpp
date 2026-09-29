@@ -4,6 +4,7 @@
 #include "ExternalRenderDataDialog.h"
 #include "MotionPreview.h"
 #include "AppPaths.h"
+#include "D3D12Context.h"
 #include <Windows.h>
 #include <windowsx.h>
 #include <CommCtrl.h>
@@ -23,14 +24,18 @@
 
 #pragma comment(lib, "Comctl32.lib")
 
+#ifndef CROW_HAS_NVAPI
+#define CROW_HAS_NVAPI 0
+#endif
+
 namespace {
-constexpr wchar_t MAIN_CLASS[] = L"DLSS5VideoConverterMainV066A1";
-constexpr wchar_t PREVIEW_CLASS[] = L"DLSS5VideoPreviewV066A1";
+constexpr wchar_t MAIN_CLASS[] = L"CrowRenderingToolMainV072A2";
+constexpr wchar_t PREVIEW_CLASS[] = L"CrowRenderingToolPreviewV072A2";
 constexpr UINT WM_APP_PROGRESS = WM_APP + 20;
 constexpr UINT WM_APP_PREVIEW = WM_APP + 21;
 constexpr UINT WM_APP_FINISHED = WM_APP + 22;
 constexpr UINT WM_APP_PROBE_FINISHED = WM_APP + 23;
-constexpr int SIDEBAR = 480;
+constexpr int SIDEBAR = 560;
 
 enum : int {
     IDC_INPUT = 100, IDC_INPUT_BROWSE, IDC_OUTPUT, IDC_OUTPUT_BROWSE,
@@ -38,11 +43,12 @@ enum : int {
     IDC_INTENSITY, IDC_LOCAL_TONE, IDC_LOCAL_STRUCTURE, IDC_SKIN_STRUCTURE,
     IDC_AUTO_MASK, IDC_UI_CORRECTION, IDC_ITERATIONS,
     IDC_TEMPORAL_MODE, IDC_FLOW_WIDTH, IDC_SCENE_CUT, IDC_MV_SCALE_X, IDC_MV_SCALE_Y,
-    IDC_NVOF_QUALITY, IDC_NVOF_GRID, IDC_NVOF_TEMPORAL_HINTS, IDC_NVOF_OUTPUT_COST,
+    IDC_SEARAFT_MODEL, IDC_SEARAFT_SCALE, IDC_SEARAFT_ITERS, IDC_SEARAFT_TRUST, IDC_SEARAFT_UNCERTAINTY,
+    IDC_NVOF_QUALITY, IDC_NVOF_GRID, IDC_NVOF_RELIABILITY, IDC_NVOF_TEMPORAL_HINTS, IDC_NVOF_OUTPUT_COST,
     IDC_DEPTH_STABILIZE, IDC_OUTPUT_STABILIZE,
     IDC_DENOISE_MODE, IDC_DENOISE_STRENGTH, IDC_DENOISE_HISTORY, IDC_DENOISE_SPATIAL, IDC_DENOISE_DETAIL,
-    IDC_CODEC, IDC_QUALITY, IDC_SETUP_VIDEO, IDC_SETUP_DEPTH, IDC_RUNTIME, IDC_SAVE_PARAMETERS,
-    IDC_EXTERNAL_DATA, IDC_EXTERNAL_SUMMARY,
+    IDC_CODEC, IDC_QUALITY, IDC_SETUP_VIDEO, IDC_SETUP_DEPTH, IDC_SETUP_SEARAFT, IDC_RUNTIME, IDC_SAVE_PARAMETERS,
+    IDC_EXTERNAL_DATA, IDC_EXTERNAL_SUMMARY, IDC_ENABLE_NR, IDC_ENABLE_FG, IDC_FG_MULTIPLIER, IDC_FG_PRESET, IDC_PIPELINE_SUMMARY,
     IDC_START, IDC_CANCEL, IDC_PROGRESS, IDC_PROGRESS_TEXT, IDC_STATUS, IDC_SIDEBAR_SCROLL,
     IDC_PREVIEW_ORIGINAL, IDC_PREVIEW_OUTPUT, IDC_PREVIEW_DEPTH, IDC_PREVIEW_MOTION
 };
@@ -64,6 +70,8 @@ struct ParameterSpec {
 // history pressure, stronger detail protection and no post-NR output history by default.
 static constexpr ParameterSpec kParameterSpecs[] = {
     {IDC_DEPTH_MODE, ParameterKind::Combo, L"depth_mode", L"0", 2},
+    {IDC_FG_MULTIPLIER, ParameterKind::Combo, L"fg_multiplier", L"0", 4},
+    {IDC_FG_PRESET, ParameterKind::Combo, L"fg_model_preset", L"0", 3},
     {IDC_DEPTH_SIZE, ParameterKind::Edit, L"dav2_size", L"518"},
     {IDC_PRESET, ParameterKind::Combo, L"nr_preset", L"2", 3},
     {IDC_STYLE, ParameterKind::Combo, L"nr_style", L"1", 2},
@@ -73,9 +81,15 @@ static constexpr ParameterSpec kParameterSpecs[] = {
     {IDC_SKIN_STRUCTURE, ParameterKind::Edit, L"nr_skin_structure", L"0.0"},
     {IDC_AUTO_MASK, ParameterKind::Check, L"nr_auto_skin_mask", L"0"},
     {IDC_UI_CORRECTION, ParameterKind::Check, L"nr_ui_correction", L"0"},
-    {IDC_TEMPORAL_MODE, ParameterKind::Combo, L"temporal_mode", L"1", 4},
+    {IDC_TEMPORAL_MODE, ParameterKind::Combo, L"temporal_mode", L"1", 5},
+    {IDC_SEARAFT_MODEL, ParameterKind::Combo, L"sea_raft_model", L"1", 1},
+    {IDC_SEARAFT_SCALE, ParameterKind::Combo, L"sea_raft_scale", L"1", 2},
+    {IDC_SEARAFT_ITERS, ParameterKind::Combo, L"sea_raft_iterations", L"3", 11},
+    {IDC_SEARAFT_TRUST, ParameterKind::Edit, L"sea_raft_trust", L"1.00"},
+    {IDC_SEARAFT_UNCERTAINTY, ParameterKind::Edit, L"sea_raft_uncertainty_sensitivity", L"1.00"},
     {IDC_NVOF_QUALITY, ParameterKind::Combo, L"nvof_quality", L"0", 2},
     {IDC_NVOF_GRID, ParameterKind::Combo, L"nvof_grid", L"0", 2},
+    {IDC_NVOF_RELIABILITY, ParameterKind::Combo, L"fg_motion_stabilization", L"1", 2},
     {IDC_NVOF_TEMPORAL_HINTS, ParameterKind::Check, L"nvof_temporal_hints", L"1"},
     {IDC_NVOF_OUTPUT_COST, ParameterKind::Check, L"nvof_output_cost", L"1"},
     {IDC_FLOW_WIDTH, ParameterKind::Edit, L"flow_width", L"480"},
@@ -98,6 +112,7 @@ constexpr int RESET_BUTTON_BASE = 5000;
 constexpr int ResetButtonId(int parameterId) { return RESET_BUTTON_BASE + parameterId; }
 
 void SyncTemporalUi(struct State* s);
+void UpdatePipelineSummary(struct State* s);
 
 struct State {
     HWND hwnd = nullptr;
@@ -119,6 +134,10 @@ struct State {
     bool hasDepth = false;
     bool hasMotion = false;
     float motionPreviewP95 = 0.0f;
+    video::VideoPreviewStats previewStats{};
+    double previewPresentedFps = 0.0;
+    uint64_t previewSamples = 0;
+    std::chrono::steady_clock::time_point previewSampleStart{};
     bool running = false;
     std::atomic_bool cancel{false};
     std::thread worker;
@@ -129,6 +148,8 @@ struct State {
     std::wstring probeError;
     int sidebarScrollY = 0;
     int sidebarContentHeight = 0;
+    UINT dpi = 96;
+    HFONT uiFont = nullptr;
     std::filesystem::path inputPath;
     std::filesystem::path outputPath;
     video::ExternalRenderDataSettings externalData;
@@ -174,6 +195,46 @@ LRESULT CALLBACK SidebarChildSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return DefSubclassProc(hwnd,msg,wp,lp);
 }
 
+int MeasureWindowTextWidth(HWND hwnd, const std::wstring& text) {
+    if (!hwnd || text.empty()) return 0;
+    HDC dc = GetDC(hwnd);
+    if (!dc) return 0;
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+    HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+    SIZE size{};
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(hwnd, dc);
+    return size.cx;
+}
+
+void FitComboDropWidth(HWND combo) {
+    if (!combo) return;
+    const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+    int widest = 0;
+    for (int i = 0; i < count; ++i) {
+        const int len = static_cast<int>(SendMessageW(combo, CB_GETLBTEXTLEN, i, 0));
+        if (len <= 0) continue;
+        std::wstring text(static_cast<size_t>(len) + 1u, L'\0');
+        SendMessageW(combo, CB_GETLBTEXT, i, reinterpret_cast<LPARAM>(text.data()));
+        text.resize(static_cast<size_t>(len));
+        widest = std::max(widest, MeasureWindowTextWidth(combo, text));
+    }
+    const UINT dpi = [] (HWND hwnd) {
+        using GetDpiForWindowFn = UINT (WINAPI*)(HWND);
+        if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+            if (auto fn = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(user32, "GetDpiForWindow"))) return fn(hwnd);
+        }
+        return 96u;
+    }(combo);
+    const int padding = MulDiv(42, static_cast<int>(dpi), 96); // arrow + scrollbar + margins
+    RECT rc{}; GetWindowRect(combo, &rc);
+    const int currentWidth = static_cast<int>(rc.right - rc.left);
+    const int desiredWidth = widest + padding;
+    const int dropWidth = (std::max)(currentWidth, desiredWidth);
+    ::SendMessageW(combo, CB_SETDROPPEDWIDTH, static_cast<WPARAM>(dropWidth), 0);
+}
+
 void Combo(HWND parent, int id, const std::vector<std::wstring>& items, int selection) {
     HWND c = GetDlgItem(parent, id);
     SendMessageW(c, CB_RESETCONTENT, 0, 0);
@@ -182,6 +243,7 @@ void Combo(HWND parent, int id, const std::vector<std::wstring>& items, int sele
 #ifdef CB_SETMINVISIBLE
     SendMessageW(c, CB_SETMINVISIBLE, static_cast<WPARAM>(items.size()), 0);
 #endif
+    FitComboDropWidth(c);
 }
 
 int ComboSel(HWND parent, int id, int fallback = 0) {
@@ -258,7 +320,9 @@ void ApplyParameterValue(HWND hwnd, const ParameterSpec& spec, const std::wstrin
             SetText(hwnd, spec.id, value);
             break;
         case ParameterKind::Combo: {
-            const int selection = std::clamp(std::stoi(value), 0, spec.comboMax);
+            const int saved = std::clamp(std::stoi(value), 0, spec.comboMax);
+            const auto count = static_cast<int>(SendMessageW(GetDlgItem(hwnd, spec.id), CB_GETCOUNT, 0, 0));
+            const int selection = count > 0 ? std::clamp(saved, 0, count - 1) : 0;
             SendMessageW(GetDlgItem(hwnd, spec.id), CB_SETCURSEL, selection, 0);
             break;
         }
@@ -326,7 +390,7 @@ void SaveParameters(State* s) {
         SaveExternalParameterSettings(s, path);
         WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
         SetText(s->hwnd, IDC_STATUS, L"Parameters saved. External channel/mapping settings are saved; EXR sequence paths remain input-specific.");
-        MessageBoxW(s->hwnd, (L"Parameters saved to:\n" + path.wstring()).c_str(), L"Crow-DLSS5-Video-Image-Converter", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(s->hwnd, (L"Parameters saved to:\n" + path.wstring()).c_str(), L"Crow - DLSS Rendering Tool", MB_OK | MB_ICONINFORMATION);
     } catch (const std::exception& e) {
         MessageBoxW(s->hwnd, ToWide(e.what()).c_str(), L"Save parameters failed", MB_ICONERROR);
     }
@@ -365,7 +429,7 @@ std::optional<std::filesystem::path> OpenVideo(HWND owner) {
 
 std::optional<std::filesystem::path> SaveVideo(HWND owner, const std::filesystem::path& input) {
     wchar_t file[32768]{};
-    const auto proposed = input.stem().wstring() + L"_DLSS5.mp4";
+    const auto proposed = input.stem().wstring() + L"_Crow.mp4";
     wcsncpy_s(file, proposed.c_str(), _TRUNCATE);
     const auto dir = input.parent_path().wstring();
     OPENFILENAMEW o{}; o.lStructSize = sizeof(o); o.hwndOwner = owner; o.lpstrFile = file; o.nMaxFile = ARRAYSIZE(file);
@@ -429,7 +493,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::wstring title = L"PREVIEW";
         if (ctx) {
             if (ctx->kind == 0) title = L"ORIGINAL - LIVE";
-            else if (ctx->kind == 1) title = L"DLSS5 - LIVE";
+            else if (ctx->kind == 1) title = L"FINAL OUTPUT - LIVE";
             else if (ctx->kind == 2) title = L"DEPTH GUIDANCE - LIVE";
             else if (ctx->kind == 3) title = L"MOTION VECTORS - LIVE | HSV direction / magnitude";
         }
@@ -442,8 +506,24 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else if (ctx->kind == 1) { image=&ctx->state->output; has=ctx->state->hasOutput; }
             else if (ctx->kind == 2) { image=&ctx->state->depth; has=ctx->state->hasDepth; }
             else { image=&ctx->state->motion; has=ctx->state->hasMotion; }
-            if (has) DrawImageFit(mem, body, *image);
-            else {
+            if (has) {
+                DrawImageFit(mem, body, *image);
+                if (ctx->kind == 1) {
+                    const wchar_t* kind = L"REAL";
+                    if (ctx->state->previewStats.frameKind == video::OutputFrameKind::Generated) kind = L"FG";
+                    else if (ctx->state->previewStats.frameKind == video::OutputFrameKind::Fallback) kind = L"FALLBACK";
+                    wchar_t overlay[320]{};
+                    swprintf_s(overlay, L"Source %.3f FPS   Output %.3f FPS   Preview %.1f FPS   Frame %llu/%llu   %s",
+                        ctx->state->previewStats.sourceFps, ctx->state->previewStats.outputFps,
+                        ctx->state->previewPresentedFps,
+                        static_cast<unsigned long long>(ctx->state->previewStats.outputFrameIndex),
+                        static_cast<unsigned long long>(ctx->state->previewStats.totalOutputFrames), kind);
+                    RECT orc{body.left + 6, body.top + 6, body.right - 6, body.top + 32};
+                    SetBkMode(mem, OPAQUE); SetBkColor(mem, RGB(18,20,24)); SetTextColor(mem, RGB(245,248,252));
+                    DrawTextW(mem, overlay, -1, &orc, DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+                    SetBkMode(mem, TRANSPARENT);
+                }
+            } else {
                 SetTextColor(mem, RGB(140,145,155));
                 const wchar_t* waiting = (ctx->kind == 3) ? L"Waiting for usable temporal motion vectors..." : L"Waiting for frames...";
                 DrawTextW(mem, waiting, -1, &body, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
@@ -456,11 +536,11 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 void EnableJobControls(State* s, bool running) {
-    const int ids[] = {IDC_INPUT_BROWSE,IDC_OUTPUT_BROWSE,IDC_DEPTH_MODE,IDC_DEPTH_SIZE,IDC_PRESET,IDC_STYLE,
+    const int ids[] = {IDC_INPUT_BROWSE,IDC_OUTPUT_BROWSE,IDC_ENABLE_NR,IDC_ENABLE_FG,IDC_DEPTH_MODE,IDC_DEPTH_SIZE,IDC_PRESET,IDC_STYLE,
         IDC_INTENSITY,IDC_LOCAL_TONE,IDC_LOCAL_STRUCTURE,IDC_SKIN_STRUCTURE,IDC_AUTO_MASK,IDC_UI_CORRECTION,
-        IDC_ITERATIONS,IDC_TEMPORAL_MODE,IDC_FLOW_WIDTH,IDC_SCENE_CUT,IDC_MV_SCALE_X,IDC_MV_SCALE_Y,
-        IDC_NVOF_QUALITY,IDC_NVOF_GRID,IDC_NVOF_TEMPORAL_HINTS,IDC_NVOF_OUTPUT_COST,IDC_DEPTH_STABILIZE,IDC_OUTPUT_STABILIZE,IDC_DENOISE_MODE,IDC_DENOISE_STRENGTH,IDC_DENOISE_HISTORY,
-        IDC_DENOISE_SPATIAL,IDC_DENOISE_DETAIL,IDC_CODEC,IDC_QUALITY,IDC_SETUP_VIDEO,IDC_SETUP_DEPTH,IDC_RUNTIME,IDC_SAVE_PARAMETERS,IDC_EXTERNAL_DATA,IDC_START};
+        IDC_ITERATIONS,IDC_TEMPORAL_MODE,IDC_SEARAFT_MODEL,IDC_SEARAFT_SCALE,IDC_SEARAFT_ITERS,IDC_SEARAFT_TRUST,IDC_SEARAFT_UNCERTAINTY,IDC_FLOW_WIDTH,IDC_SCENE_CUT,IDC_MV_SCALE_X,IDC_MV_SCALE_Y,
+        IDC_NVOF_QUALITY,IDC_NVOF_GRID,IDC_NVOF_RELIABILITY,IDC_NVOF_TEMPORAL_HINTS,IDC_NVOF_OUTPUT_COST,IDC_DEPTH_STABILIZE,IDC_OUTPUT_STABILIZE,IDC_DENOISE_MODE,IDC_DENOISE_STRENGTH,IDC_DENOISE_HISTORY,
+        IDC_DENOISE_SPATIAL,IDC_DENOISE_DETAIL,IDC_CODEC,IDC_QUALITY,IDC_SETUP_VIDEO,IDC_SETUP_DEPTH,IDC_SETUP_SEARAFT,IDC_RUNTIME,IDC_SAVE_PARAMETERS,IDC_EXTERNAL_DATA,IDC_START};
     for (int id : ids) EnableWindow(GetDlgItem(s->hwnd,id), !running);
     for (const auto& spec : kParameterSpecs) EnableWindow(GetDlgItem(s->hwnd, ResetButtonId(spec.id)), !running);
     EnableWindow(GetDlgItem(s->hwnd,IDC_CANCEL), running);
@@ -490,9 +570,33 @@ void StartProbe(State* s, const std::filesystem::path& path) {
     });
 }
 
+uint32_t UiMaxFgMultiplier() {
+    try {
+        D3D12Context d3d;
+        DXGI_ADAPTER_DESC1 desc{};
+        if (d3d.Adapter() && SUCCEEDED(d3d.Adapter()->GetDesc1(&desc))) {
+            const std::wstring name = desc.Description;
+            if (name.find(L"RTX 40") != std::wstring::npos) return 2;
+            if (name.find(L"RTX 50") != std::wstring::npos) return 6;
+        }
+    } catch (...) {}
+    return 2; // conservative until runtime capability validation
+}
+
+void PopulateFgMultiplier(HWND hwnd) {
+    const uint32_t maxMultiplier = UiMaxFgMultiplier();
+    std::vector<std::wstring> items;
+    for (uint32_t m = 2; m <= maxMultiplier; ++m) items.push_back(std::to_wstring(m) + L"X");
+    Combo(hwnd, IDC_FG_MULTIPLIER, items, 0);
+}
+
 video::VideoSettings ReadSettings(State* s) {
     video::VideoSettings v;
     v.input = s->inputPath; v.output = s->outputPath;
+    v.enableDlssNr = Button_GetCheck(GetDlgItem(s->hwnd,IDC_ENABLE_NR)) == BST_CHECKED;
+    v.enableFrameGeneration2X = Button_GetCheck(GetDlgItem(s->hwnd,IDC_ENABLE_FG)) == BST_CHECKED;
+    v.fgMultiplier = static_cast<uint32_t>(std::clamp(ComboSel(s->hwnd, IDC_FG_MULTIPLIER, 0), 0, 4) + 2);
+    v.fgModelPreset = static_cast<video::FgModelPreset>(std::clamp(ComboSel(s->hwnd, IDC_FG_PRESET, 0), 0, 3));
     switch (std::clamp(ComboSel(s->hwnd, IDC_DEPTH_MODE, 0), 0, 2)) {
     case 1: v.depthMode = video::DepthMode::AutoDepth; break;
     case 2: v.depthMode = video::DepthMode::ExternalExr; break;
@@ -512,13 +616,26 @@ video::VideoSettings ReadSettings(State* s) {
     v.dlss.depthInverted = v.depthMode == video::DepthMode::AutoDepth ||
         (v.depthMode == video::DepthMode::ExternalExr && v.externalData.depth.depthInverted);
     const uint32_t its[] = {1,2,4,8}; v.dlss.iterations = its[std::clamp(ComboSel(s->hwnd,IDC_ITERATIONS,0),0,3)];
-    switch (std::clamp(ComboSel(s->hwnd,IDC_TEMPORAL_MODE,1),0,4)) {
+    switch (std::clamp(ComboSel(s->hwnd,IDC_TEMPORAL_MODE,1),0,5)) {
     case 0: v.temporalMode = video::TemporalMode::LegacyResetEveryFrame; break;
     case 2: v.temporalMode = video::TemporalMode::CpuFlow; break;
     case 3: v.temporalMode = video::TemporalMode::ExternalExr; break;
     case 4: v.temporalMode = video::TemporalMode::NvidiaOpticalFlow; break;
+    case 5: v.temporalMode = video::TemporalMode::SeaRaft; break;
     default: v.temporalMode = video::TemporalMode::DisOpticalFlow; break;
     }
+    if (v.enableFrameGeneration2X && v.temporalMode != video::TemporalMode::NvidiaOpticalFlow &&
+        v.temporalMode != video::TemporalMode::SeaRaft &&
+        v.temporalMode != video::TemporalMode::ExternalExr) v.temporalMode = video::TemporalMode::NvidiaOpticalFlow;
+    v.seaRaft.model = ComboSel(s->hwnd, IDC_SEARAFT_MODEL, 1) == 0 ? video::SeaRaftModel::Small : video::SeaRaftModel::Medium;
+    switch (std::clamp(ComboSel(s->hwnd, IDC_SEARAFT_SCALE, 1), 0, 2)) {
+    case 0: v.seaRaft.inferenceScale = -2; break;
+    case 2: v.seaRaft.inferenceScale = 0; break;
+    default: v.seaRaft.inferenceScale = -1; break;
+    }
+    v.seaRaft.refinementIterations = static_cast<uint32_t>(std::clamp(ComboSel(s->hwnd, IDC_SEARAFT_ITERS, 3), 0, 11) + 1);
+    v.seaRaft.neuralFlowTrust = std::clamp(ReadFloat(s->hwnd, IDC_SEARAFT_TRUST, 1.0f), 0.50f, 1.50f);
+    v.seaRaft.uncertaintySensitivity = std::clamp(ReadFloat(s->hwnd, IDC_SEARAFT_UNCERTAINTY, 1.0f), 0.25f, 2.50f);
     switch (std::clamp(ComboSel(s->hwnd,IDC_NVOF_QUALITY,0),0,2)) {
     case 1: v.nvof.quality = video::NvofQuality::Medium; break;
     case 2: v.nvof.quality = video::NvofQuality::Fast; break;
@@ -529,8 +646,16 @@ video::VideoSettings ReadSettings(State* s) {
     case 2: v.nvof.outputGridSize = 1; break;
     default: v.nvof.outputGridSize = 4; break;
     }
+    switch (std::clamp(ComboSel(s->hwnd,IDC_NVOF_RELIABILITY,1),0,2)) {
+    case 0: v.nvof.reliability = video::NvofReliabilityMode::Off; break;
+    case 2: v.nvof.reliability = video::NvofReliabilityMode::Strong; break;
+    default: v.nvof.reliability = video::NvofReliabilityMode::Auto; break;
+    }
     v.nvof.temporalHints = Button_GetCheck(GetDlgItem(s->hwnd,IDC_NVOF_TEMPORAL_HINTS)) == BST_CHECKED;
     v.nvof.outputCost = Button_GetCheck(GetDlgItem(s->hwnd,IDC_NVOF_OUTPUT_COST)) == BST_CHECKED;
+    if ((v.enableDlssNr || v.enableFrameGeneration2X) && v.temporalMode == video::TemporalMode::NvidiaOpticalFlow &&
+        v.nvof.reliability != video::NvofReliabilityMode::Off) v.nvof.outputCost = true;
+    if (!v.enableDlssNr && !v.enableFrameGeneration2X) v.nvof.reliability = video::NvofReliabilityMode::Off;
     v.flowAnalysisWidth = static_cast<uint32_t>(std::clamp(ReadInt(s->hwnd,IDC_FLOW_WIDTH,480),128,960));
     v.sceneCutThreshold = std::clamp(ReadFloat(s->hwnd,IDC_SCENE_CUT,0.28f),0.05f,0.95f);
     v.mvecScaleX = std::clamp(ReadFloat(s->hwnd,IDC_MV_SCALE_X,1.0f),-8.0f,8.0f);
@@ -558,17 +683,22 @@ void UpdateProgressUi(State* s) {
     const int pos = static_cast<int>(std::lround(std::clamp(p.fraction,0.0,1.0)*1000.0));
     SendMessageW(GetDlgItem(s->hwnd,IDC_PROGRESS),PBM_SETPOS,pos,0);
     wchar_t b[512]{};
-    swprintf_s(b,L"%.1f%%   Frame %llu / %llu   Speed %.2f fps   Elapsed %s   ETA %s",
+    swprintf_s(b,L"%.1f%%   Source %llu/%llu   Output %llu/%llu   Process %.2f fps   %.3f -> %.3f fps   Elapsed %s   ETA %s",
         p.fraction*100.0, static_cast<unsigned long long>(p.frameIndex), static_cast<unsigned long long>(p.totalFrames),
-        p.processingFps, TimeText(p.elapsedSeconds).c_str(), TimeText(p.etaSeconds).c_str());
+        static_cast<unsigned long long>(p.outputFrameIndex), static_cast<unsigned long long>(p.totalOutputFrames),
+        p.processingFps, p.sourceFps, p.outputFps, TimeText(p.elapsedSeconds).c_str(), TimeText(p.etaSeconds).c_str());
     SetText(s->hwnd,IDC_PROGRESS_TEXT,b);
     SetText(s->hwnd,IDC_STATUS,p.message);
 }
 
 void StartJob(State* s) {
     if (s->running) return;
-    if (s->probing) { MessageBoxW(s->hwnd,L"Video metadata is still being probed. Please wait a moment.",L"Crow-DLSS5-Video-Image-Converter",MB_ICONINFORMATION); return; }
-    if (s->inputPath.empty() || s->outputPath.empty()) { MessageBoxW(s->hwnd,L"Choose input and output video paths first.",L"Crow-DLSS5-Video-Image-Converter",MB_ICONWARNING); return; }
+    if (s->probing) { MessageBoxW(s->hwnd,L"Video metadata is still being probed. Please wait a moment.",L"Crow - DLSS Rendering Tool",MB_ICONINFORMATION); return; }
+    if (s->inputPath.empty() || s->outputPath.empty()) { MessageBoxW(s->hwnd,L"Choose input and output video paths first.",L"Crow - DLSS Rendering Tool",MB_ICONWARNING); return; }
+    if (Button_GetCheck(GetDlgItem(s->hwnd,IDC_ENABLE_NR)) != BST_CHECKED &&
+        Button_GetCheck(GetDlgItem(s->hwnd,IDC_ENABLE_FG)) != BST_CHECKED) {
+        MessageBoxW(s->hwnd,L"Enable DLSS5 Neural Rendering, Frame Generation / MFG, or both.",L"Crow - DLSS Rendering Tool",MB_ICONWARNING); return;
+    }
     auto settings = ReadSettings(s);
     s->cancel.store(false); s->error.clear(); s->running=true; EnableJobControls(s,true);
     SendMessageW(GetDlgItem(s->hwnd,IDC_PROGRESS),PBM_SETPOS,0,0);
@@ -580,10 +710,21 @@ void StartJob(State* s) {
                 PostMessageW(s->hwnd,WM_APP_PROGRESS,0,0);
             };
             cb.onPreview = [s](const Rgba8Image& a, const Rgba8Image& b, const std::vector<float>* d,
-                               const std::vector<float>* motion, float motionScaleX, float motionScaleY) {
+                               const std::vector<float>* motion, float motionScaleX, float motionScaleY,
+                               const video::VideoPreviewStats& stats) {
                 {
                     std::lock_guard lock(s->mutex);
                     s->original=a; s->output=b; s->hasOriginal=true; s->hasOutput=true;
+                    s->previewStats = stats;
+                    const auto now = std::chrono::steady_clock::now();
+                    if (s->previewSampleStart.time_since_epoch().count() == 0) s->previewSampleStart = now;
+                    ++s->previewSamples;
+                    const double sampleSeconds = std::chrono::duration<double>(now - s->previewSampleStart).count();
+                    if (sampleSeconds >= 0.5) {
+                        s->previewPresentedFps = static_cast<double>(s->previewSamples) / sampleSeconds;
+                        s->previewSamples = 0;
+                        s->previewSampleStart = now;
+                    }
                     if (d) { MakeDepthPreview(*d,a.width,a.height,s->depth); s->hasDepth=true; }
                     else s->hasDepth=false;
                     if (motion) {
@@ -607,75 +748,120 @@ void StartJob(State* s) {
     });
 }
 
+int DpiScale(const State* s, int logicalPx) {
+    const UINT dpi = (s && s->dpi) ? s->dpi : 96u;
+    return MulDiv(logicalPx, static_cast<int>(dpi), 96);
+}
+
+void ApplyDpiFont(State* s) {
+    if (!s || !s->hwnd) return;
+    if (s->uiFont) {
+        DeleteObject(s->uiFont);
+        s->uiFont = nullptr;
+    }
+    const int height = -MulDiv(9, static_cast<int>(s->dpi ? s->dpi : 96u), 72);
+    s->uiFont = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT font = s->uiFont ? s->uiFont : static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    for (HWND ch = GetWindow(s->hwnd, GW_CHILD); ch; ch = GetWindow(ch, GW_HWNDNEXT)) {
+        SendMessageW(ch, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        wchar_t cls[32]{};
+        GetClassNameW(ch, cls, ARRAYSIZE(cls));
+        if (lstrcmpiW(cls, WC_COMBOBOXW) == 0) FitComboDropWidth(ch);
+    }
+}
+
 void Layout(State* s) {
     RECT c{}; GetClientRect(s->hwnd,&c);
     const int W=std::max(1, static_cast<int>(c.right-c.left));
     const int H=std::max(1, static_cast<int>(c.bottom-c.top));
-    const int side=std::min(SIDEBAR,std::max(330,W/3));
-    const int scrollBarW=17, scrollGap=6;
-    const int scrollX=std::max(314,side-scrollBarW-5);
-    const int x=12, w=std::max(260,scrollX-scrollGap-x), label=112, row=24;
+    const int side=std::min(DpiScale(s,SIDEBAR),std::max(DpiScale(s,460),(W*2)/5));
+    const int scrollBarW=DpiScale(s,17), scrollGap=DpiScale(s,6);
+    const int scrollX=std::max(DpiScale(s,314),side-scrollBarW-DpiScale(s,5));
+    const int x=DpiScale(s,12), w=std::max(DpiScale(s,260),scrollX-scrollGap-x);
+    const int label=DpiScale(s,150), row=DpiScale(s,24), labelH=DpiScale(s,38), parameterStep=DpiScale(s,42);
     const int scrollOffset=s->sidebarScrollY;
-    int y=10;
-    const int resetW=50, gap=6, valueX=x+label, resetX=x+w-resetW;
-    const int standardValueW=std::max(60,resetX-gap-valueX);
-    auto moveFixed=[&](int id,int X,int Y,int ww,int hh){ MoveWindow(GetDlgItem(s->hwnd,id),X,Y,std::max(1,ww),std::max(1,hh),TRUE); };
+    int y=DpiScale(s,10);
+    const int resetW=DpiScale(s,50), gap=DpiScale(s,6), valueX=x+label, resetX=x+w-resetW;
+    const int standardValueW=std::max(DpiScale(s,60),resetX-gap-valueX);
+    auto moveFixed=[&](int id,int X,int Y,int ww,int hh){
+        if(HWND h=GetDlgItem(s->hwnd,id)) MoveWindow(h,X,Y,std::max(1,ww),std::max(1,hh),TRUE);
+    };
     auto move=[&](int id,int X,int Y,int ww,int hh){ moveFixed(id,X,Y-scrollOffset,ww,hh); };
+    auto labelAt=[&](int parameterId,int Y){ move(1000+parameterId,x,Y,label-DpiScale(s,6),labelH); };
     auto reset=[&](int parameterId,int X,int Y){ move(ResetButtonId(parameterId),X,Y,resetW,row); };
-    auto standard=[&](int parameterId,int Y){ move(parameterId,valueX,Y,standardValueW,row); reset(parameterId,resetX,Y); };
-    auto standardH=[&](int parameterId,int Y,int hh){ move(parameterId,valueX,Y,standardValueW,hh); reset(parameterId,resetX,Y); };
+    auto standard=[&](int parameterId,int Y){
+        labelAt(parameterId,Y); move(parameterId,valueX,Y,standardValueW,row); reset(parameterId,resetX,Y);
+    };
+    auto standardH=[&](int parameterId,int Y,int hh){
+        labelAt(parameterId,Y); move(parameterId,valueX,Y,standardValueW,hh); reset(parameterId,resetX,Y);
+    };
     auto pairChecks=[&](int leftId,int rightId,int Y){
-        const int half=(w-gap)/2; const int checkW=std::max(70,half-resetW-gap);
+        const int half=(w-gap)/2; const int checkW=std::max(DpiScale(s,70),half-resetW-gap);
         move(leftId,x,Y,checkW,row); reset(leftId,x+checkW+gap,Y);
         const int rx=x+half+gap; move(rightId,rx,Y,checkW,row); reset(rightId,rx+checkW+gap,Y);
     };
-    move(IDC_INPUT,x,y,w-86,row); move(IDC_INPUT_BROWSE,x+w-80,y,80,row); y+=30;
-    move(IDC_OUTPUT,x,y,w-86,row); move(IDC_OUTPUT_BROWSE,x+w-80,y,80,row); y+=30;
-    move(IDC_INFO,x,y,w,42); y+=48;
-    move(IDC_SETUP_VIDEO,x,y,w/2-4,row); move(IDC_SETUP_DEPTH,x+w/2+4,y,w/2-4,row); y+=30;
-    move(IDC_RUNTIME,x,y,w,row); y+=30;
-    move(IDC_SAVE_PARAMETERS,x,y,w,row); y+=30;
-    move(IDC_EXTERNAL_DATA,x,y,w,row); y+=28;
-    move(IDC_EXTERNAL_SUMMARY,x,y,w,34); y+=40;
-    standardH(IDC_DEPTH_MODE,y,row*6); y+=30;
-    standard(IDC_DEPTH_SIZE,y); y+=34;
-    standardH(IDC_PRESET,y,150); y+=30;
-    standardH(IDC_STYLE,y,130); y+=30;
-    standard(IDC_INTENSITY,y); y+=28;
-    standard(IDC_LOCAL_TONE,y); y+=28;
-    standard(IDC_LOCAL_STRUCTURE,y); y+=28;
-    standard(IDC_SKIN_STRUCTURE,y); y+=28;
-    pairChecks(IDC_AUTO_MASK,IDC_UI_CORRECTION,y); y+=30;
-    standardH(IDC_TEMPORAL_MODE,y,120); y+=30;
-    standardH(IDC_NVOF_QUALITY,y,100); y+=30;
-    standardH(IDC_NVOF_GRID,y,100); y+=30;
-    pairChecks(IDC_NVOF_TEMPORAL_HINTS,IDC_NVOF_OUTPUT_COST,y); y+=30;
-    standard(IDC_FLOW_WIDTH,y); y+=28;
-    standard(IDC_SCENE_CUT,y); y+=28;
+    move(IDC_INPUT,x,y,w-DpiScale(s,86),row); move(IDC_INPUT_BROWSE,x+w-DpiScale(s,80),y,DpiScale(s,80),row); y+=DpiScale(s,30);
+    move(IDC_OUTPUT,x,y,w-DpiScale(s,86),row); move(IDC_OUTPUT_BROWSE,x+w-DpiScale(s,80),y,DpiScale(s,80),row); y+=DpiScale(s,30);
+    move(IDC_INFO,x,y,w,DpiScale(s,42)); y+=DpiScale(s,48);
+    move(IDC_SETUP_VIDEO,x,y,w/2-DpiScale(s,4),row); move(IDC_SETUP_DEPTH,x+w/2+DpiScale(s,4),y,w/2-DpiScale(s,4),row); y+=DpiScale(s,30);
+    move(IDC_SETUP_SEARAFT,x,y,w,row); y+=DpiScale(s,30);
+    move(IDC_RUNTIME,x,y,w,row); y+=DpiScale(s,30);
+    move(IDC_SAVE_PARAMETERS,x,y,w,row); y+=DpiScale(s,30);
+    move(IDC_EXTERNAL_DATA,x,y,w,row); y+=DpiScale(s,28);
+    move(IDC_EXTERNAL_SUMMARY,x,y,w,DpiScale(s,34)); y+=DpiScale(s,40);
+    move(IDC_ENABLE_NR,x,y,w,row); y+=DpiScale(s,28);
+    move(IDC_ENABLE_FG,x,y,w,row); y+=DpiScale(s,28);
+    standardH(IDC_FG_MULTIPLIER,y,DpiScale(s,100)); y+=parameterStep;
+    standardH(IDC_FG_PRESET,y,DpiScale(s,120)); y+=parameterStep;
+    move(IDC_PIPELINE_SUMMARY,x,y,w,DpiScale(s,38)); y+=DpiScale(s,44);
+    standardH(IDC_DEPTH_MODE,y,row*6); y+=parameterStep;
+    standard(IDC_DEPTH_SIZE,y); y+=parameterStep;
+    standardH(IDC_PRESET,y,DpiScale(s,150)); y+=parameterStep;
+    standardH(IDC_STYLE,y,DpiScale(s,130)); y+=parameterStep;
+    standard(IDC_INTENSITY,y); y+=parameterStep;
+    standard(IDC_LOCAL_TONE,y); y+=parameterStep;
+    standard(IDC_LOCAL_STRUCTURE,y); y+=parameterStep;
+    standard(IDC_SKIN_STRUCTURE,y); y+=parameterStep;
+    pairChecks(IDC_AUTO_MASK,IDC_UI_CORRECTION,y); y+=DpiScale(s,30);
+    standardH(IDC_TEMPORAL_MODE,y,DpiScale(s,120)); y+=parameterStep;
+    standardH(IDC_SEARAFT_MODEL,y,DpiScale(s,100)); y+=parameterStep;
+    standardH(IDC_SEARAFT_SCALE,y,DpiScale(s,100)); y+=parameterStep;
+    standardH(IDC_SEARAFT_ITERS,y,DpiScale(s,220)); y+=parameterStep;
+    standard(IDC_SEARAFT_TRUST,y); y+=parameterStep;
+    standard(IDC_SEARAFT_UNCERTAINTY,y); y+=parameterStep;
+    standardH(IDC_NVOF_QUALITY,y,DpiScale(s,100)); y+=parameterStep;
+    standardH(IDC_NVOF_GRID,y,DpiScale(s,100)); y+=parameterStep;
+    standardH(IDC_NVOF_RELIABILITY,y,DpiScale(s,150)); y+=parameterStep;
+    pairChecks(IDC_NVOF_TEMPORAL_HINTS,IDC_NVOF_OUTPUT_COST,y); y+=DpiScale(s,30);
+    standard(IDC_FLOW_WIDTH,y); y+=parameterStep;
+    standard(IDC_SCENE_CUT,y); y+=parameterStep;
     {
-        const int avail=w-label; const int unit=(avail-gap)/2; const int fieldW=std::max(44,unit-resetW-gap);
+        labelAt(IDC_MV_SCALE_X,y);
+        const int avail=w-label; const int unit=(avail-gap)/2; const int fieldW=std::max(DpiScale(s,44),unit-resetW-gap);
         const int x1=valueX; move(IDC_MV_SCALE_X,x1,y,fieldW,row); reset(IDC_MV_SCALE_X,x1+fieldW+gap,y);
         const int x2=valueX+unit+gap; move(IDC_MV_SCALE_Y,x2,y,fieldW,row); reset(IDC_MV_SCALE_Y,x2+fieldW+gap,y);
     }
-    y+=28;
-    pairChecks(IDC_DEPTH_STABILIZE,IDC_OUTPUT_STABILIZE,y); y+=30;
-    standardH(IDC_DENOISE_MODE,y,120); y+=30;
-    standard(IDC_DENOISE_STRENGTH,y); y+=28;
-    standard(IDC_DENOISE_HISTORY,y); y+=28;
-    standard(IDC_DENOISE_SPATIAL,y); y+=28;
-    standard(IDC_DENOISE_DETAIL,y); y+=30;
-    standardH(IDC_ITERATIONS,y,120); y+=30;
-    standardH(IDC_CODEC,y,140); y+=30;
-    standard(IDC_QUALITY,y); y+=36;
-    move(IDC_START,x,y,w/2-4,30); move(IDC_CANCEL,x+w/2+4,y,w/2-4,30); y+=38;
-    move(IDC_PROGRESS,x,y,w,22); y+=26;
-    move(IDC_PROGRESS_TEXT,x,y,w,42); y+=46;
-    constexpr int statusH=68;
-    move(IDC_STATUS,x,y,w,statusH); y+=statusH+10;
+    y+=parameterStep;
+    pairChecks(IDC_DEPTH_STABILIZE,IDC_OUTPUT_STABILIZE,y); y+=DpiScale(s,30);
+    standardH(IDC_DENOISE_MODE,y,DpiScale(s,120)); y+=parameterStep;
+    standard(IDC_DENOISE_STRENGTH,y); y+=parameterStep;
+    standard(IDC_DENOISE_HISTORY,y); y+=parameterStep;
+    standard(IDC_DENOISE_SPATIAL,y); y+=parameterStep;
+    standard(IDC_DENOISE_DETAIL,y); y+=parameterStep;
+    standardH(IDC_ITERATIONS,y,DpiScale(s,120)); y+=parameterStep;
+    standardH(IDC_CODEC,y,DpiScale(s,140)); y+=parameterStep;
+    standard(IDC_QUALITY,y); y+=parameterStep;
+    move(IDC_START,x,y,w/2-DpiScale(s,4),DpiScale(s,30)); move(IDC_CANCEL,x+w/2+DpiScale(s,4),y,w/2-DpiScale(s,4),DpiScale(s,30)); y+=DpiScale(s,38);
+    move(IDC_PROGRESS,x,y,w,DpiScale(s,22)); y+=DpiScale(s,26);
+    move(IDC_PROGRESS_TEXT,x,y,w,DpiScale(s,42)); y+=DpiScale(s,46);
+    const int statusH=DpiScale(s,68);
+    move(IDC_STATUS,x,y,w,statusH); y+=statusH+DpiScale(s,10);
 
     s->sidebarContentHeight=y;
     HWND sidebarScroll=GetDlgItem(s->hwnd,IDC_SIDEBAR_SCROLL);
-    moveFixed(IDC_SIDEBAR_SCROLL,scrollX,8,scrollBarW,std::max(24,H-16));
+    moveFixed(IDC_SIDEBAR_SCROLL,scrollX,DpiScale(s,8),scrollBarW,std::max(DpiScale(s,24),H-DpiScale(s,16)));
     const int maxScroll=std::max(0,s->sidebarContentHeight-H);
     const int clampedScroll=std::clamp(s->sidebarScrollY,0,maxScroll);
     SCROLLINFO scrollInfo{};
@@ -694,17 +880,15 @@ void Layout(State* s) {
         return;
     }
 
-    // V0.6.5.3 preview matrix: Original / DLSS5 on the first row,
-    // Depth / Motion on the second row. All four panes receive equal logical area.
-    const int px=side+8, pw=std::max(200,W-px-8), gapPreview=8;
-    const int availableH=std::max(200,H-16);
-    const int leftW=std::max(100,(pw-gapPreview)/2);
-    const int rightW=std::max(100,pw-leftW-gapPreview);
-    const int topH=std::max(100,(availableH-gapPreview)/2);
-    const int bottomH=std::max(100,availableH-topH-gapPreview);
-    const int bottomY=8+topH+gapPreview;
-    MoveWindow(s->previewOriginal,px,8,leftW,topH,TRUE);
-    MoveWindow(s->previewOutput,px+leftW+gapPreview,8,rightW,topH,TRUE);
+    const int px=side+DpiScale(s,8), pw=std::max(DpiScale(s,200),W-px-DpiScale(s,8)), gapPreview=DpiScale(s,8);
+    const int availableH=std::max(DpiScale(s,200),H-DpiScale(s,16));
+    const int leftW=std::max(DpiScale(s,100),(pw-gapPreview)/2);
+    const int rightW=std::max(DpiScale(s,100),pw-leftW-gapPreview);
+    const int topH=std::max(DpiScale(s,100),(availableH-gapPreview)/2);
+    const int bottomH=std::max(DpiScale(s,100),availableH-topH-gapPreview);
+    const int top=DpiScale(s,8), bottomY=top+topH+gapPreview;
+    MoveWindow(s->previewOriginal,px,top,leftW,topH,TRUE);
+    MoveWindow(s->previewOutput,px+leftW+gapPreview,top,rightW,topH,TRUE);
     MoveWindow(s->previewDepth,px,bottomY,leftW,bottomH,TRUE);
     MoveWindow(s->previewMotion,px+leftW+gapPreview,bottomY,rightW,bottomH,TRUE);
 }
@@ -721,13 +905,24 @@ void CreateControls(State* s) {
     Make(h,L"STATIC",L"Choose a video to probe resolution / FPS / duration.",SS_LEFT,IDC_INFO);
     Make(h,L"BUTTON",L"Setup FFmpeg",BS_PUSHBUTTON,IDC_SETUP_VIDEO);
     Make(h,L"BUTTON",L"Setup Auto Depth / Temporal",BS_PUSHBUTTON,IDC_SETUP_DEPTH);
+    Make(h,L"BUTTON",L"Setup SEA-RAFT Neural Motion",BS_PUSHBUTTON,IDC_SETUP_SEARAFT);
     Make(h,L"BUTTON",L"Runtime DLL...",BS_PUSHBUTTON,IDC_RUNTIME);
     Make(h,L"BUTTON",L"Save Parameters",BS_PUSHBUTTON,IDC_SAVE_PARAMETERS);
-    Make(h,L"BUTTON",L"External Render Data...",BS_PUSHBUTTON,IDC_EXTERNAL_DATA);
+    Make(h,L"BUTTON",L"External EXR Guidance (NR / FG)...",BS_PUSHBUTTON,IDC_EXTERNAL_DATA);
     Make(h,L"STATIC",L"Depth: not selected   Motion: not selected",SS_LEFT,IDC_EXTERNAL_SUMMARY);
+    Make(h,L"BUTTON",L"DLSS5 Neural Rendering (NR)",BS_AUTOCHECKBOX,IDC_ENABLE_NR); Button_SetCheck(GetDlgItem(h,IDC_ENABLE_NR),BST_CHECKED);
+    Make(h,L"BUTTON",L"DLSS Frame Generation / Multi Frame Generation",BS_AUTOCHECKBOX,IDC_ENABLE_FG); Button_SetCheck(GetDlgItem(h,IDC_ENABLE_FG),BST_UNCHECKED);
+    Make(h,L"STATIC",L"Pipeline: DLSS5 NR",SS_LEFT,IDC_PIPELINE_SUMMARY);
 
     // Create labels as ordinary static controls with IDs 1000 + control ID.
     auto field=[&](int id,const wchar_t* name,const wchar_t* cls,const wchar_t* text,DWORD style){ Label(h,name,1000+id); Make(h,cls,text,style,id); };
+    field(IDC_FG_MULTIPLIER,L"FG Multiplier",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); PopulateFgMultiplier(h);
+    field(IDC_FG_PRESET,L"FG Model Preset",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL);
+#if CROW_HAS_NVAPI
+    Combo(h,IDC_FG_PRESET,{L"Driver Default",L"Preset A",L"Preset B",L"Latest"},0);
+#else
+    Combo(h,IDC_FG_PRESET,{L"Driver Default (NVAPI unavailable)"},0);
+#endif
     field(IDC_DEPTH_MODE,L"Depth Mode",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_DEPTH_MODE,{L"Zero Depth",L"Auto Depth - Depth Anything V2",L"External EXR Sequence"},0);
     field(IDC_DEPTH_SIZE,L"DAV2 Size",L"EDIT",L"518",WS_BORDER|ES_AUTOHSCROLL);
     field(IDC_PRESET,L"NR Preset",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_PRESET,{L"Default",L"Preset #1",L"Preset #2",L"Preset #3"},2);
@@ -738,9 +933,16 @@ void CreateControls(State* s) {
     field(IDC_SKIN_STRUCTURE,L"Skin Structure",L"EDIT",L"0.0",WS_BORDER|ES_AUTOHSCROLL);
     Make(h,L"BUTTON",L"Auto Skin Mask",BS_AUTOCHECKBOX,IDC_AUTO_MASK); Button_SetCheck(GetDlgItem(h,IDC_AUTO_MASK),BST_UNCHECKED);
     Make(h,L"BUTTON",L"UI Correction",BS_AUTOCHECKBOX,IDC_UI_CORRECTION); Button_SetCheck(GetDlgItem(h,IDC_UI_CORRECTION),BST_UNCHECKED);
-    field(IDC_TEMPORAL_MODE,L"Temporal",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_TEMPORAL_MODE,{L"Legacy - Reset Every Frame",L"Adaptive DIS - Stable Default",L"CPU Block Flow - Fallback",L"External EXR Motion - CG Ground Truth",L"NVIDIA Optical Flow - NVOF D3D12 Alpha"},1);
+    field(IDC_TEMPORAL_MODE,L"Motion Backend / Optical Flow",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_TEMPORAL_MODE,{L"Legacy - Reset Every Frame",L"Adaptive DIS - Stable Default",L"CPU Block Flow - Fallback",L"External EXR Motion - CG Ground Truth",L"NVIDIA Optical Flow - NVOF D3D12 Alpha",L"SEA-RAFT - Tunable Neural (CUDA)"},1);
+    field(IDC_SEARAFT_MODEL,L"SEA-RAFT Model",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_SEARAFT_MODEL,{L"Spring-S - Faster / 8.9M",L"Spring-M - Recommended / 19.7M"},1);
+    field(IDC_SEARAFT_SCALE,L"SEA-RAFT Inference Resolution",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_SEARAFT_SCALE,{L"Quarter - Fast",L"Half - Recommended",L"Full - Ultra / High VRAM"},1);
+    field(IDC_SEARAFT_ITERS,L"SEA-RAFT Refinement Iterations",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_SEARAFT_ITERS,{L"1",L"2",L"3",L"4 - Recommended",L"5",L"6",L"7",L"8 - High",L"9",L"10",L"11",L"12 - Ultra"},3);
+    field(IDC_SEARAFT_TRUST,L"SEA-RAFT Neural Flow Trust",L"EDIT",L"1.00",WS_BORDER|ES_AUTOHSCROLL);
+    field(IDC_SEARAFT_UNCERTAINTY,L"SEA-RAFT Uncertainty Sensitivity",L"EDIT",L"1.00",WS_BORDER|ES_AUTOHSCROLL);
     field(IDC_NVOF_QUALITY,L"NVOF Quality",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_NVOF_QUALITY,{L"Quality / Slow",L"Balanced / Medium",L"Performance / Fast"},0);
     field(IDC_NVOF_GRID,L"NVOF Grid",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_NVOF_GRID,{L"4x4 - Validated Stable",L"2x2 - Finer",L"1x1 - Finest"},0);
+    // Alpha6 NVOF compatibility labels retained for regression contracts: Auto - Predictive Multi-Scale / NR Safe / FG 3F | Strong - Predictive 3-Scale / NR Safe / FG 5F
+    field(IDC_NVOF_RELIABILITY,L"NR / FG Motion Stabilization",WC_COMBOBOXW,L"",CBS_DROPDOWNLIST|WS_VSCROLL); Combo(h,IDC_NVOF_RELIABILITY,{L"Off - Raw Backend Flow",L"Auto - Backend Confidence / NR Safe / FG 3F",L"Strong - Backend Confidence / NR Safe / FG 5F"},1);
     Make(h,L"BUTTON",L"NVOF Temporal Hints",BS_AUTOCHECKBOX,IDC_NVOF_TEMPORAL_HINTS); Button_SetCheck(GetDlgItem(h,IDC_NVOF_TEMPORAL_HINTS),BST_CHECKED);
     Make(h,L"BUTTON",L"NVOF Output Cost",BS_AUTOCHECKBOX,IDC_NVOF_OUTPUT_COST); Button_SetCheck(GetDlgItem(h,IDC_NVOF_OUTPUT_COST),BST_CHECKED);
     field(IDC_FLOW_WIDTH,L"Flow Width",L"EDIT",L"480",WS_BORDER|ES_AUTOHSCROLL);
@@ -768,31 +970,21 @@ void CreateControls(State* s) {
     s->previewOutput=CreateWindowExW(0,PREVIEW_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_BORDER,0,0,10,10,h,reinterpret_cast<HMENU>(IDC_PREVIEW_OUTPUT),inst,&s->previewCtx[1]);
     s->previewDepth=CreateWindowExW(0,PREVIEW_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_BORDER,0,0,10,10,h,reinterpret_cast<HMENU>(IDC_PREVIEW_DEPTH),inst,&s->previewCtx[2]);
     s->previewMotion=CreateWindowExW(0,PREVIEW_CLASS,L"",WS_CHILD|WS_VISIBLE|WS_BORDER,0,0,10,10,h,reinterpret_cast<HMENU>(IDC_PREVIEW_MOTION),inst,&s->previewCtx[3]);
-    HFONT font=static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    ApplyDpiFont(s);
     for(HWND ch=GetWindow(h,GW_CHILD);ch;ch=GetWindow(ch,GW_HWNDNEXT)) {
-        SendMessageW(ch,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE);
         const int childId=GetDlgCtrlID(ch);
         if(childId!=IDC_PREVIEW_ORIGINAL && childId!=IDC_PREVIEW_OUTPUT && childId!=IDC_PREVIEW_DEPTH && childId!=IDC_PREVIEW_MOTION && childId!=IDC_SIDEBAR_SCROLL)
             SetWindowSubclass(ch,SidebarChildSubclassProc,1,reinterpret_cast<DWORD_PTR>(s));
     }
     for (const auto& spec : kParameterSpecs) ApplyParameterValue(h, spec, spec.factoryValue);
     const bool loadedSavedParameters = LoadSavedParameters(s);
+#if !CROW_HAS_NVAPI
+    SendMessageW(GetDlgItem(h,IDC_FG_PRESET),CB_SETCURSEL,0,0);
+#endif
     SyncTemporalUi(s);
+    UpdatePipelineSummary(s);
     UpdateExternalSummary(s);
     if (loadedSavedParameters) SetText(h,IDC_STATUS,L"Saved parameters loaded. Per-parameter Reset restores factory defaults.");
-}
-
-void LayoutLabels(State* s) {
-    // Synchronize label positions with the scrollable sidebar fields after Layout().
-    const int x=12,label=112,scrollOffset=s->sidebarScrollY;
-    int y=10+30+30+48+30+30+30+28+40;
-    auto place=[&](int control,int advance){ MoveWindow(GetDlgItem(s->hwnd,1000+control),x,y-scrollOffset,label-6,24,TRUE); y+=advance; };
-    place(IDC_DEPTH_MODE,30); place(IDC_DEPTH_SIZE,34); place(IDC_PRESET,30); place(IDC_STYLE,30);
-    place(IDC_INTENSITY,28); place(IDC_LOCAL_TONE,28); place(IDC_LOCAL_STRUCTURE,28); place(IDC_SKIN_STRUCTURE,28);
-    y+=30; place(IDC_TEMPORAL_MODE,30); place(IDC_NVOF_QUALITY,30); place(IDC_NVOF_GRID,30); y+=30;
-    place(IDC_FLOW_WIDTH,28); place(IDC_SCENE_CUT,28); place(IDC_MV_SCALE_X,28);
-    y+=30; place(IDC_DENOISE_MODE,30); place(IDC_DENOISE_STRENGTH,28); place(IDC_DENOISE_HISTORY,28);
-    place(IDC_DENOISE_SPATIAL,28); place(IDC_DENOISE_DETAIL,30); place(IDC_ITERATIONS,30); place(IDC_CODEC,30); place(IDC_QUALITY,36);
 }
 
 void SetSidebarScrollPosition(State* s, int requestedPosition) {
@@ -803,10 +995,9 @@ void SetSidebarScrollPosition(State* s, int requestedPosition) {
     const int next=std::clamp(requestedPosition,0,maxScroll);
     if(next==s->sidebarScrollY) return;
 
-    // Do not call Layout()/LayoutLabels() for every wheel tick. Re-running the full
-    // layout repeatedly resizes Win32 combo boxes and moves labels/controls in two
-    // separate passes. On Windows that can leave stale child-window paint and can
-    // make labels, Reset buttons and combo edit portions appear to drift or clip.
+    // Do not call the full Layout() for every wheel tick. The canonical layout is
+    // rebuilt only on resize/DPI changes; scrolling translates all sidebar children
+    // by one identical delta so combo boxes are never repeatedly resized.
     // Instead, move every sidebar child by one identical delta in one DeferWindowPos
     // batch. Logical coordinates are still rebuilt from scratch by Layout() on WM_SIZE.
     const int old=s->sidebarScrollY;
@@ -815,9 +1006,9 @@ void SetSidebarScrollPosition(State* s, int requestedPosition) {
 
     RECT client{}; GetClientRect(s->hwnd,&client);
     const int W=std::max(1,static_cast<int>(client.right-client.left));
-    const int side=std::min(SIDEBAR,std::max(330,W/3));
-    const int scrollBarW=17;
-    const int scrollX=std::max(314,side-scrollBarW-5);
+    const int side=std::min(DpiScale(s,SIDEBAR),std::max(DpiScale(s,460),(W*2)/5));
+    const int scrollBarW=DpiScale(s,17);
+    const int scrollX=std::max(DpiScale(s,314),side-scrollBarW-DpiScale(s,5));
 
     std::vector<HWND> children;
     children.reserve(96);
@@ -866,37 +1057,107 @@ void SetSidebarScrollPosition(State* s, int requestedPosition) {
         RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW);
 }
 
+void UpdatePipelineSummary(State* s) {
+    if (!s || !s->hwnd) return;
+    const bool nr = Button_GetCheck(GetDlgItem(s->hwnd, IDC_ENABLE_NR)) == BST_CHECKED;
+    const bool fg = Button_GetCheck(GetDlgItem(s->hwnd, IDC_ENABLE_FG)) == BST_CHECKED;
+    const uint32_t multiplier = static_cast<uint32_t>(std::clamp(ComboSel(s->hwnd, IDC_FG_MULTIPLIER, 0), 0, 4) + 2);
+    const std::wstring fgName = L"DLSS Frame Generation " + std::to_wstring(multiplier) + L"X";
+    std::wstring text;
+    if (nr && fg) text = L"Pipeline: DLSS5 NR -> " + fgName;
+    else if (nr) text = L"Pipeline: DLSS5 Neural Rendering";
+    else if (fg) text = L"Pipeline: " + fgName;
+    else text = L"Pipeline: no processing feature selected";
+    video::VideoInfo info;
+    { std::lock_guard lock(s->mutex); info = s->probeInfo; }
+    if (info.fps > 0.0) {
+        wchar_t fps[128]{};
+        swprintf_s(fps, L"   |   %.3f -> %.3f FPS", info.fps, fg ? info.fps * static_cast<double>(multiplier) : info.fps);
+        text += fps;
+    }
+    SetText(s->hwnd, IDC_PIPELINE_SUMMARY, text);
+}
+
 void SyncTemporalUi(State* s) {
     const int depthMode = ComboSel(s->hwnd, IDC_DEPTH_MODE, 0);
+    const bool fgEnabled = Button_GetCheck(GetDlgItem(s->hwnd, IDC_ENABLE_FG)) == BST_CHECKED;
+    if (fgEnabled) {
+        const int currentTemporal = ComboSel(s->hwnd, IDC_TEMPORAL_MODE, 1);
+        if (currentTemporal != 3 && currentTemporal != 4 && currentTemporal != 5)
+            SendMessageW(GetDlgItem(s->hwnd, IDC_TEMPORAL_MODE), CB_SETCURSEL, 4, 0);
+    }
     const int temporalMode = ComboSel(s->hwnd, IDC_TEMPORAL_MODE, 1);
     const bool temporal = temporalMode != 0;
     const bool nvof = temporalMode == 4;
-    const bool flowWidthRelevant = temporal && temporalMode != 4;
+    const bool seaRaft = temporalMode == 5;
+    const bool flowWidthRelevant = temporal && temporalMode != 4 && temporalMode != 5;
     auto enableWithReset=[&](int id,bool enabled){ EnableWindow(GetDlgItem(s->hwnd,id),enabled); EnableWindow(GetDlgItem(s->hwnd,ResetButtonId(id)),enabled); };
-    enableWithReset(IDC_DEPTH_SIZE, depthMode == 1 && !s->running);
+    EnableWindow(GetDlgItem(s->hwnd, IDC_TEMPORAL_MODE), !s->running);
+    EnableWindow(GetDlgItem(s->hwnd, ResetButtonId(IDC_TEMPORAL_MODE)), !s->running);
+    enableWithReset(IDC_FG_MULTIPLIER, fgEnabled && !s->running);
+    #if CROW_HAS_NVAPI
+    enableWithReset(IDC_FG_PRESET, fgEnabled && !s->running);
+#else
+    enableWithReset(IDC_FG_PRESET, false);
+#endif
+    const bool nrEnabled = Button_GetCheck(GetDlgItem(s->hwnd, IDC_ENABLE_NR)) == BST_CHECKED;
+    const int nrControls[] = {IDC_DEPTH_MODE,IDC_PRESET,IDC_STYLE,IDC_INTENSITY,IDC_LOCAL_TONE,IDC_LOCAL_STRUCTURE,
+        IDC_SKIN_STRUCTURE,IDC_AUTO_MASK,IDC_UI_CORRECTION,IDC_DEPTH_STABILIZE,IDC_OUTPUT_STABILIZE,IDC_DENOISE_MODE,
+        IDC_DENOISE_STRENGTH,IDC_DENOISE_HISTORY,IDC_DENOISE_SPATIAL,IDC_DENOISE_DETAIL,IDC_ITERATIONS,IDC_SETUP_DEPTH,IDC_EXTERNAL_DATA};
+    for (int id : nrControls) EnableWindow(GetDlgItem(s->hwnd,id), nrEnabled && !s->running);
+    EnableWindow(GetDlgItem(s->hwnd, IDC_SETUP_DEPTH), (nrEnabled || fgEnabled) && !s->running);
+    EnableWindow(GetDlgItem(s->hwnd, IDC_SETUP_SEARAFT), !s->running);
+    const bool guidanceEnabled = (nrEnabled || fgEnabled) && !s->running;
+    EnableWindow(GetDlgItem(s->hwnd, IDC_DEPTH_MODE), guidanceEnabled);
+    EnableWindow(GetDlgItem(s->hwnd, ResetButtonId(IDC_DEPTH_MODE)), guidanceEnabled);
+    for (const auto& spec : kParameterSpecs) {
+        bool isNr = spec.id==IDC_DEPTH_MODE || spec.id==IDC_DEPTH_SIZE || spec.id==IDC_PRESET || spec.id==IDC_STYLE ||
+            spec.id==IDC_INTENSITY || spec.id==IDC_LOCAL_TONE || spec.id==IDC_LOCAL_STRUCTURE || spec.id==IDC_SKIN_STRUCTURE ||
+            spec.id==IDC_AUTO_MASK || spec.id==IDC_UI_CORRECTION || spec.id==IDC_DEPTH_STABILIZE || spec.id==IDC_OUTPUT_STABILIZE ||
+            spec.id==IDC_DENOISE_MODE || spec.id==IDC_DENOISE_STRENGTH || spec.id==IDC_DENOISE_HISTORY ||
+            spec.id==IDC_DENOISE_SPATIAL || spec.id==IDC_DENOISE_DETAIL || spec.id==IDC_ITERATIONS;
+        if (isNr) EnableWindow(GetDlgItem(s->hwnd,ResetButtonId(spec.id)), nrEnabled && !s->running);
+    }
+    enableWithReset(IDC_DEPTH_SIZE, (nrEnabled || fgEnabled) && depthMode == 1 && !s->running);
     EnableWindow(GetDlgItem(s->hwnd, IDC_EXTERNAL_DATA), !s->running);
+    enableWithReset(IDC_SEARAFT_MODEL, seaRaft && !s->running);
+    enableWithReset(IDC_SEARAFT_SCALE, seaRaft && !s->running);
+    enableWithReset(IDC_SEARAFT_ITERS, seaRaft && !s->running);
+    enableWithReset(IDC_SEARAFT_TRUST, seaRaft && !s->running);
+    enableWithReset(IDC_SEARAFT_UNCERTAINTY, seaRaft && !s->running);
     enableWithReset(IDC_NVOF_QUALITY, nvof && !s->running);
     enableWithReset(IDC_NVOF_GRID, nvof && !s->running);
+    enableWithReset(IDC_NVOF_RELIABILITY, (nvof || seaRaft) && (nrEnabled || fgEnabled) && !s->running);
+    const bool reliableMotionActive = nvof && (nrEnabled || fgEnabled) && ComboSel(s->hwnd, IDC_NVOF_RELIABILITY, 1) != 0;
+    if (reliableMotionActive) Button_SetCheck(GetDlgItem(s->hwnd, IDC_NVOF_OUTPUT_COST), BST_CHECKED);
     enableWithReset(IDC_NVOF_TEMPORAL_HINTS, nvof && !s->running);
-    enableWithReset(IDC_NVOF_OUTPUT_COST, nvof && !s->running);
+    enableWithReset(IDC_NVOF_OUTPUT_COST, nvof && !reliableMotionActive && !s->running);
     enableWithReset(IDC_FLOW_WIDTH, flowWidthRelevant && !s->running);
     enableWithReset(IDC_SCENE_CUT, temporal && !s->running);
     enableWithReset(IDC_MV_SCALE_X, temporal && !s->running);
     enableWithReset(IDC_MV_SCALE_Y, temporal && !s->running);
-    enableWithReset(IDC_DEPTH_STABILIZE, temporal && !s->running);
-    enableWithReset(IDC_OUTPUT_STABILIZE, temporal && !s->running);
+    enableWithReset(IDC_DEPTH_STABILIZE, nrEnabled && temporal && !s->running);
+    enableWithReset(IDC_OUTPUT_STABILIZE, nrEnabled && temporal && !s->running);
     const bool denoise = ComboSel(s->hwnd, IDC_DENOISE_MODE, 2) != 0;
-    enableWithReset(IDC_DENOISE_MODE, !s->running);
-    enableWithReset(IDC_DENOISE_STRENGTH, denoise && !s->running);
-    enableWithReset(IDC_DENOISE_HISTORY, denoise && !s->running);
-    enableWithReset(IDC_DENOISE_SPATIAL, denoise && !s->running);
-    enableWithReset(IDC_DENOISE_DETAIL, denoise && !s->running);
-    enableWithReset(IDC_ITERATIONS, !temporal && !s->running);
+    enableWithReset(IDC_DENOISE_MODE, nrEnabled && !s->running);
+    enableWithReset(IDC_DENOISE_STRENGTH, nrEnabled && denoise && !s->running);
+    enableWithReset(IDC_DENOISE_HISTORY, nrEnabled && denoise && !s->running);
+    enableWithReset(IDC_DENOISE_SPATIAL, nrEnabled && denoise && !s->running);
+    enableWithReset(IDC_DENOISE_DETAIL, nrEnabled && denoise && !s->running);
+    enableWithReset(IDC_ITERATIONS, nrEnabled && !temporal && !s->running);
+    UpdatePipelineSummary(s);
 }
 
 void RunSetupVideo(State* s) {
     const auto script=app::ExecutableDir()/L"video"/L"setup_video.ps1";
     if(!std::filesystem::exists(script)){MessageBoxW(s->hwnd,L"setup_video.ps1 is missing.",L"Video Dependencies",MB_ICONERROR);return;}
+    std::wstring args=L"-NoProfile -ExecutionPolicy Bypass -File \""+script.wstring()+L"\"";
+    ShellExecuteW(s->hwnd,L"open",L"powershell.exe",args.c_str(),script.parent_path().c_str(),SW_SHOWNORMAL);
+}
+
+void RunSetupSeaRaft(State* s) {
+    const auto script=app::ExecutableDir()/L"sea_raft"/L"setup_sea_raft.ps1";
+    if(!std::filesystem::exists(script)){MessageBoxW(s->hwnd,L"setup_sea_raft.ps1 is missing.",L"SEA-RAFT Neural Motion",MB_ICONERROR);return;}
     std::wstring args=L"-NoProfile -ExecutionPolicy Bypass -File \""+script.wstring()+L"\"";
     ShellExecuteW(s->hwnd,L"open",L"powershell.exe",args.c_str(),script.parent_path().c_str(),SW_SHOWNORMAL);
 }
@@ -916,22 +1177,63 @@ void ImportRuntime(State* s) {
     catch(const std::exception&e){MessageBoxW(s->hwnd,ToWide(e.what()).c_str(),L"Runtime import failed",MB_ICONERROR);}
 }
 
+void RefreshPreviewSurfaces(State* s) {
+    if (!s) return;
+    HWND previews[] = {s->previewOriginal, s->previewOutput, s->previewDepth, s->previewMotion};
+    for (HWND h : previews) {
+        if (!h) continue;
+        InvalidateRect(h, nullptr, FALSE);
+        RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE|RDW_FRAME|RDW_ALLCHILDREN|RDW_UPDATENOW);
+    }
+    if (s->hwnd) {
+        RECT c{}; GetClientRect(s->hwnd, &c);
+        const int side=std::min(DpiScale(s,SIDEBAR),std::max(DpiScale(s,460),(static_cast<int>(c.right-c.left)*2)/5));
+        RECT previewArea{side,0,c.right,c.bottom};
+        RedrawWindow(s->hwnd,&previewArea,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW);
+    }
+}
+
 LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* s=reinterpret_cast<State*>(GetWindowLongPtrW(hwnd,GWLP_USERDATA));
     if(msg==WM_NCCREATE){auto*cs=reinterpret_cast<CREATESTRUCTW*>(lp);s=static_cast<State*>(cs->lpCreateParams);s->hwnd=hwnd;SetWindowLongPtrW(hwnd,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(s));}
     switch(msg){
-    case WM_CREATE: CreateControls(s); Layout(s); LayoutLabels(s); return 0;
-    case WM_SIZE: if(s){Layout(s);LayoutLabels(s);} return 0;
-    case WM_GETMINMAXINFO: {auto*m=reinterpret_cast<MINMAXINFO*>(lp);m->ptMinTrackSize={1180,760};return 0;}
+    case WM_CREATE:
+        if(s){ s->dpi=GetDpiForWindow(hwnd); CreateControls(s); Layout(s); }
+        return 0;
+    case WM_SIZE:
+        if(s){
+            const UINT dpi=GetDpiForWindow(hwnd);
+            if(dpi) s->dpi=dpi;
+            Layout(s);
+            if(wp != SIZE_MINIMIZED) RefreshPreviewSurfaces(s);
+        }
+        return 0;
+    case WM_DPICHANGED:
+        if(s){
+            s->dpi=HIWORD(wp);
+            ApplyDpiFont(s);
+            const RECT* suggested=reinterpret_cast<const RECT*>(lp);
+            if(suggested) SetWindowPos(hwnd,nullptr,suggested->left,suggested->top,
+                suggested->right-suggested->left,suggested->bottom-suggested->top,
+                SWP_NOZORDER|SWP_NOACTIVATE);
+            Layout(s);
+            RefreshPreviewSurfaces(s);
+        }
+        return 0;
+    case WM_GETMINMAXINFO: {
+        auto*m=reinterpret_cast<MINMAXINFO*>(lp);
+        m->ptMinTrackSize={DpiScale(s,1280),DpiScale(s,800)};
+        return 0;
+    }
     case WM_VSCROLL: if(s && reinterpret_cast<HWND>(lp)==GetDlgItem(hwnd,IDC_SIDEBAR_SCROLL)) {
         int next=s->sidebarScrollY;
         SCROLLINFO si{}; si.cbSize=sizeof(si); si.fMask=SIF_TRACKPOS;
         GetScrollInfo(reinterpret_cast<HWND>(lp),SB_CTL,&si);
         switch(LOWORD(wp)){
-        case SB_LINEUP: next-=28; break;
-        case SB_LINEDOWN: next+=28; break;
-        case SB_PAGEUP: {RECT c{};GetClientRect(hwnd,&c);next-=std::max(120,static_cast<int>(c.bottom-c.top)-80);break;}
-        case SB_PAGEDOWN: {RECT c{};GetClientRect(hwnd,&c);next+=std::max(120,static_cast<int>(c.bottom-c.top)-80);break;}
+        case SB_LINEUP: next-=DpiScale(s,28); break;
+        case SB_LINEDOWN: next+=DpiScale(s,28); break;
+        case SB_PAGEUP: {RECT c{};GetClientRect(hwnd,&c);next-=std::max(DpiScale(s,120),static_cast<int>(c.bottom-c.top)-DpiScale(s,80));break;}
+        case SB_PAGEDOWN: {RECT c{};GetClientRect(hwnd,&c);next+=std::max(DpiScale(s,120),static_cast<int>(c.bottom-c.top)-DpiScale(s,80));break;}
         case SB_THUMBPOSITION:
         case SB_THUMBTRACK: next=si.nTrackPos; break;
         case SB_TOP: next=0; break;
@@ -945,12 +1247,12 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
         ScreenToClient(hwnd,&pt);
         RECT c{};GetClientRect(hwnd,&c);
-        const int side=std::min(SIDEBAR,std::max(330,static_cast<int>(c.right-c.left)/3));
+        const int side=std::min(DpiScale(s,SIDEBAR),std::max(DpiScale(s,460),(static_cast<int>(c.right-c.left)*2)/5));
         if(pt.x>=0 && pt.x<side){
             const int wheel=GET_WHEEL_DELTA_WPARAM(wp);
             if(wheel!=0){
                 const int steps=std::max(1,std::abs(wheel)/WHEEL_DELTA);
-                SetSidebarScrollPosition(s,s->sidebarScrollY+(wheel>0?-1:1)*steps*84);
+                SetSidebarScrollPosition(s,s->sidebarScrollY+(wheel>0?-1:1)*steps*DpiScale(s,84));
                 return 0;
             }
         }
@@ -963,19 +1265,27 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (FindParameterSpec(parameterId)) { ResetOneParameter(s, parameterId); return 0; }
         }
         switch(commandId){
-        case IDC_INPUT_BROWSE: if(auto p=OpenVideo(hwnd)){s->inputPath=*p;SetText(hwnd,IDC_INPUT,p->wstring());if(s->outputPath.empty()){s->outputPath=p->parent_path()/(p->stem().wstring()+L"_DLSS5.mp4");SetText(hwnd,IDC_OUTPUT,s->outputPath.wstring());}StartProbe(s,*p);} return 0;
+        case IDC_INPUT_BROWSE: if(auto p=OpenVideo(hwnd)){s->inputPath=*p;SetText(hwnd,IDC_INPUT,p->wstring());if(s->outputPath.empty()){s->outputPath=p->parent_path()/(p->stem().wstring()+L"_Crow.mp4");SetText(hwnd,IDC_OUTPUT,s->outputPath.wstring());}StartProbe(s,*p);} return 0;
         case IDC_OUTPUT_BROWSE: if(auto p=SaveVideo(hwnd,s->inputPath)){s->outputPath=*p;SetText(hwnd,IDC_OUTPUT,p->wstring());} return 0;
         case IDC_SETUP_VIDEO: RunSetupVideo(s); return 0;
         case IDC_SETUP_DEPTH: RunSetupDepth(s); return 0;
+        case IDC_SETUP_SEARAFT: RunSetupSeaRaft(s); return 0;
         case IDC_RUNTIME: ImportRuntime(s); return 0;
         case IDC_SAVE_PARAMETERS: SaveParameters(s); return 0;
         case IDC_EXTERNAL_DATA: EditExternalData(s); return 0;
+        case IDC_ENABLE_NR:
+        case IDC_ENABLE_FG:
+            if (HIWORD(wp)==BN_CLICKED) { SyncTemporalUi(s); UpdatePipelineSummary(s); }
+            return 0;
         case IDC_DEPTH_MODE: if(HIWORD(wp)==CBN_SELCHANGE) {
             if (ComboSel(s->hwnd, IDC_DEPTH_MODE, 0) == 2)
                 Button_SetCheck(GetDlgItem(s->hwnd,IDC_DEPTH_STABILIZE), BST_UNCHECKED);
             SyncTemporalUi(s);
         } return 0;
         case IDC_TEMPORAL_MODE: if(HIWORD(wp)==CBN_SELCHANGE) SyncTemporalUi(s); return 0;
+        case IDC_FG_MULTIPLIER:
+        case IDC_FG_PRESET: if(HIWORD(wp)==CBN_SELCHANGE) UpdatePipelineSummary(s); return 0;
+        case IDC_NVOF_RELIABILITY: if(HIWORD(wp)==CBN_SELCHANGE) SyncTemporalUi(s); return 0;
         case IDC_DENOISE_MODE: if(HIWORD(wp)==CBN_SELCHANGE) SyncTemporalUi(s); return 0;
         case IDC_START: StartJob(s); return 0;
         case IDC_CANCEL: s->cancel.store(true);SetText(hwnd,IDC_STATUS,L"Cancelling safely... current GPU/FFmpeg operation will finish before teardown.");return 0;
@@ -989,15 +1299,16 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if(!err.empty()){SetText(hwnd,IDC_INFO,L"Probe failed: "+err);}
         else {wchar_t b[256]{};std::wstring codec = i.codecName.empty() ? L"unknown" : ToWide(i.codecName);
 swprintf_s(b,L"%ux%u  %.3f fps  %s  Duration %s  Frames ~%llu  Audio %s",i.width,i.height,i.fps,codec.c_str(),TimeText(i.durationSeconds).c_str(),static_cast<unsigned long long>(i.totalFrames),i.hasAudio?L"Yes":L"No");SetText(hwnd,IDC_INFO,b);}
+        UpdatePipelineSummary(s);
         EnableWindow(GetDlgItem(hwnd,IDC_INPUT_BROWSE),!s->running);
         EnableWindow(GetDlgItem(hwnd,IDC_START),!s->running);
         return 0;
     }
     case WM_APP_PROGRESS: if(s)UpdateProgressUi(s);return 0;
     case WM_APP_PREVIEW: if(s){InvalidateRect(s->previewOriginal,nullptr,FALSE);InvalidateRect(s->previewOutput,nullptr,FALSE);InvalidateRect(s->previewDepth,nullptr,FALSE);InvalidateRect(s->previewMotion,nullptr,FALSE);}return 0;
-    case WM_APP_FINISHED: if(s){if(s->worker.joinable())s->worker.join();s->running=false;EnableJobControls(s,false);UpdateProgressUi(s);std::wstring err;{std::lock_guard lock(s->mutex);err=s->error;}if(!err.empty()){SetText(hwnd,IDC_STATUS,L"Failed.");MessageBoxW(hwnd,err.c_str(),L"Video conversion failed",MB_ICONERROR);}else if(!s->cancel.load()){MessageBoxW(hwnd,L"Video conversion completed.",L"Crow-DLSS5-Video-Image-Converter",MB_OK|MB_ICONINFORMATION);} }return 0;
-    case WM_CLOSE: if(s&&(s->running||s->probing)){if(MessageBoxW(hwnd,L"A video operation is running. Cancel it and close?",L"Crow-DLSS5-Video-Image-Converter",MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;s->cancel.store(true);s->probeCancel.store(true);}DestroyWindow(hwnd);return 0;
-    case WM_DESTROY: if(s){s->cancel.store(true);s->probeCancel.store(true);if(s->worker.joinable())s->worker.join();if(s->probeWorker.joinable())s->probeWorker.join();}PostQuitMessage(0);return 0;
+    case WM_APP_FINISHED: if(s){if(s->worker.joinable())s->worker.join();s->running=false;EnableJobControls(s,false);UpdateProgressUi(s);std::wstring err;{std::lock_guard lock(s->mutex);err=s->error;}if(!err.empty()){SetText(hwnd,IDC_STATUS,L"Failed.");MessageBoxW(hwnd,err.c_str(),L"Video conversion failed",MB_ICONERROR);}else if(!s->cancel.load()){MessageBoxW(hwnd,L"Video conversion completed.",L"Crow - DLSS Rendering Tool",MB_OK|MB_ICONINFORMATION);} }return 0;
+    case WM_CLOSE: if(s&&(s->running||s->probing)){if(MessageBoxW(hwnd,L"A video operation is running. Cancel it and close?",L"Crow - DLSS Rendering Tool",MB_YESNO|MB_ICONQUESTION)!=IDYES)return 0;s->cancel.store(true);s->probeCancel.store(true);}DestroyWindow(hwnd);return 0;
+    case WM_DESTROY: if(s){s->cancel.store(true);s->probeCancel.store(true);if(s->worker.joinable())s->worker.join();if(s->probeWorker.joinable())s->probeWorker.join();if(s->uiFont){DeleteObject(s->uiFont);s->uiFont=nullptr;}}PostQuitMessage(0);return 0;
     }
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
@@ -1006,11 +1317,16 @@ swprintf_s(b,L"%ux%u  %.3f fps  %s  Duration %s  Frames ~%llu  Audio %s",i.width
 
 int RunVideoGuiApp(void* instance, int showCommand) {
     auto inst=static_cast<HINSTANCE>(instance);
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using SetDpiContextFn = BOOL (WINAPI*)(DPI_AWARENESS_CONTEXT);
+        if (auto setDpi = reinterpret_cast<SetDpiContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext")))
+            setDpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
     INITCOMMONCONTROLSEX ic{sizeof(ic),ICC_STANDARD_CLASSES|ICC_PROGRESS_CLASS};InitCommonControlsEx(&ic);
     WNDCLASSEXW pc{sizeof(pc)};pc.hInstance=inst;pc.lpfnWndProc=PreviewProc;pc.lpszClassName=PREVIEW_CLASS;pc.hCursor=LoadCursorW(nullptr,IDC_ARROW);pc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1);RegisterClassExW(&pc);
     WNDCLASSEXW wc{sizeof(wc)};wc.hInstance=inst;wc.lpfnWndProc=MainProc;wc.lpszClassName=MAIN_CLASS;wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=LoadIconW(nullptr,IDI_APPLICATION);wc.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_BTNFACE+1);RegisterClassExW(&wc);
     State state;
-    HWND h=CreateWindowExW(0,MAIN_CLASS,L"Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
+    HWND h=CreateWindowExW(0,MAIN_CLASS,L"Crow - DLSS Rendering Tool V0.7.3-alpha1",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
         CW_USEDEFAULT,CW_USEDEFAULT,1580,1100,nullptr,nullptr,inst,&state);
     if(!h)return 1;ShowWindow(h,showCommand);UpdateWindow(h);
     MSG m{};while(GetMessageW(&m,nullptr,0,0)>0){TranslateMessage(&m);DispatchMessageW(&m);}return static_cast<int>(m.wParam);

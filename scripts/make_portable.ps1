@@ -1,7 +1,7 @@
 ﻿param(
     [switch]$ChinaMirror,
     [switch]$NoZip,
-    [string]$Version = 'V0.6.6-alpha2'
+    [string]$Version = 'V0.7.3-alpha1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,7 +12,7 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Deps = Join-Path $Root '.deps'
 $Dist = Join-Path $Root 'dist'
 $PortableRoot = Join-Path $Root 'portable'
-$PortableName = "Crow-DLSS5-Video-Image-Converter-$Version-Portable-x64"
+$PortableName = "Crow-DLSS-Rendering-Tool-$Version-Portable-x64"
 $Out = Join-Path $PortableRoot $PortableName
 $Zip = Join-Path $PortableRoot ($PortableName + '.zip')
 $BuilderPointer = Join-Path $Deps 'portable-builder-python.path'
@@ -60,7 +60,7 @@ function Find-BuilderPython {
             return (Resolve-Path $c).Path
         }
     }
-    throw 'x64 Python 3.11-3.13 with pip was not found. Run AUTO_BUILD_CN.bat/AUTO_BUILD.bat first.'
+    throw 'x64 Python 3.11-3.13 with pip was not found. Run BUILD.bat Full Build first.'
 }
 
 function Invoke-Checked([string]$Exe,[string[]]$Arguments) {
@@ -123,32 +123,46 @@ $pyXY = (& $Builder -c "import sys; print(f'{sys.version_info[0]}{sys.version_in
 Ok "Portable builder Python: $Builder ($pyVersion x64)"
 
 Step 'Validating compiled/runtime inputs'
-$requiredExe = @(
-    'Crow-DLSS5-Video-Image-Converter-CLI.exe',
-    'Crow-DLSS5-Video-Image-Converter-Image.exe',
-    'Crow-DLSS5-Video-Image-Converter-Video.exe',
-    'Crow-DLSS5-Video-Image-Converter-Runtime-Self-Test.exe',
-    'Crow-DLSS5-Video-Image-Converter-NVOF-Self-Test.exe',
-    'Crow-DLSS5-Video-Image-Converter-NVOF-Execute-Self-Test.exe'
+$requiredMainExe = @(
+    'Crow-DLSS-Rendering-Tool-Image.exe',
+    'Crow-DLSS-Rendering-Tool.exe'
 )
-foreach ($name in $requiredExe) {
+$requiredToolExe = @(
+    'Crow-DLSS-Rendering-Tool-CLI.exe',
+    'Crow-DLSS-Rendering-Tool-FG-Diagnostic.exe',
+    'Crow-DLSS-Rendering-Tool-Runtime-Self-Test.exe',
+    'Crow-DLSS-Rendering-Tool-NVOF-Self-Test.exe',
+    'Crow-DLSS-Rendering-Tool-NVOF-Execute-Self-Test.exe'
+)
+foreach ($name in $requiredMainExe) {
     if (-not (Test-Path (Join-Path $Dist $name))) { throw "Missing compiled output: dist\\$name" }
 }
+foreach ($name in $requiredToolExe) {
+    if (-not (Test-Path (Join-Path $Dist ('tools\\' + $name)))) { throw "Missing diagnostic output: dist\\tools\\$name" }
+}
 $Runtime = Join-Path $Dist 'runtime\nvngx_dlssnr.dll'
+$FgRuntime = Join-Path $Dist 'runtime\nvngx_dlssg.dll'
 if (-not (Test-Path $Runtime)) {
     throw @'
 DLSSNR runtime was not imported.
 Portable builds intentionally do not download nvngx_dlssnr.dll automatically.
-Import your validated runtime first with RTX40_RUNTIME_IMPORT.bat or scripts\import_runtime.ps1, then retry.
+Import your validated runtime with scripts\import_runtime.ps1, then retry.
 '@
+}
+if (-not (Test-Path $FgRuntime)) {
+    throw 'DLSS-G runtime is missing under dist\runtime. Current Full/Portable builds require and stage nvngx_dlssg.dll automatically; rerun BUILD.bat and complete the required runtime step.'
 }
 $Ffmpeg = Join-Path $Dist 'video\ffmpeg'
 if (-not (Test-Path (Join-Path $Ffmpeg 'bin\ffmpeg.exe')) -or -not (Test-Path (Join-Path $Ffmpeg 'bin\ffprobe.exe'))) {
-    throw 'FFmpeg is not ready under dist\video\ffmpeg. Run AUTO_BUILD_CN.bat/AUTO_BUILD.bat first.'
+    throw 'FFmpeg is not ready under dist\video\ffmpeg. Run BUILD.bat Full Build first.'
 }
 $Model = Join-Path $Dist 'models\depth_anything_v2\model_fp16.onnx'
 if (-not (Test-Path $Model)) { throw 'Depth Anything V2 model is missing under dist\models. Run model setup first.' }
-Ok 'Compiled EXEs, DLSSNR runtime, FFmpeg and Depth Anything model are present.'
+$SeaRaft = Join-Path $Dist 'sea_raft'
+foreach ($requiredSea in @('.venv\Scripts\python.exe','vendor\SEA-RAFT\core\raft.py','models\spring-S\model.safetensors','models\spring-M\model.safetensors')) {
+    if (-not (Test-Path (Join-Path $SeaRaft $requiredSea))) { throw "SEA-RAFT portable runtime is incomplete: $requiredSea. Run Full Build first." }
+}
+Ok 'Compiled EXEs, runtimes, FFmpeg, Depth Anything and SEA-RAFT are present.'
 
 Step 'Cleaning previous portable tree with long-path-safe Python'
 New-Item -ItemType Directory -Force -Path $PortableRoot | Out-Null
@@ -157,12 +171,21 @@ if (Test-Path $Zip) { Remove-Item -LiteralPath $Zip -Force }
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 Step 'Staging converter binaries and runtime data'
-foreach ($name in $requiredExe) { Copy-RequiredFile (Join-Path $Dist $name) (Join-Path $Out $name) }
+foreach ($name in $requiredMainExe) { Copy-RequiredFile (Join-Path $Dist $name) (Join-Path $Out $name) }
+$portableTools = Join-Path $Out 'tools'
+New-Item -ItemType Directory -Force -Path $portableTools | Out-Null
+foreach ($name in $requiredToolExe) { Copy-RequiredFile (Join-Path $Dist ('tools\' + $name)) (Join-Path $portableTools $name) }
+foreach ($name in @('SELF_TESTS.bat','VIDEO_PERFORMANCE_MODE.bat','VIDEO_LEGACY_SYNC_SAFE_MODE.bat')) {
+    $src = Join-Path $Dist ('tools\' + $name)
+    if (Test-Path $src) { Copy-RequiredFile $src (Join-Path $portableTools $name) }
+}
 Copy-Tree (Join-Path $Dist 'runtime') (Join-Path $Out 'runtime')
 Copy-Tree $Ffmpeg (Join-Path $Out 'video\ffmpeg')
 Copy-RequiredFile (Join-Path $Root 'video\setup_video.ps1') (Join-Path $Out 'video\setup_video.ps1')
 Copy-RequiredFile (Join-Path $Root 'video\setup_video_cn.ps1') (Join-Path $Out 'video\setup_video_cn.ps1')
 Copy-Tree (Join-Path $Dist 'models') (Join-Path $Out 'models')
+Invoke-Checked $Builder @($StageTool,'copy',$SeaRaft,(Join-Path $Out 'sea_raft'))
+Invoke-Checked $Builder @($StageTool,'prune',(Join-Path $Out 'sea_raft'))
 Copy-RequiredFile (Join-Path $Root 'LICENSE') (Join-Path $Out 'LICENSE')
 Copy-RequiredFile (Join-Path $Root 'docs\NOTICE.md') (Join-Path $Out 'NOTICE.md')
 
@@ -229,12 +252,12 @@ Ok 'Relocatable embedded Python + AutoDepth/DIS dependencies verified.'
 
 Step 'Writing portable README and manifest'
 $readme = @"
-Crow-DLSS5-Video-Image-Converter $Version - Portable x64
+Crow - DLSS Rendering Tool $Version - Portable x64
 ================================================
 
 Main applications:
-  Crow-DLSS5-Video-Image-Converter-Image.exe
-  Crow-DLSS5-Video-Image-Converter-Video.exe
+  Crow-DLSS-Rendering-Tool-Image.exe
+  Crow-DLSS-Rendering-Tool.exe
 
 This package is designed to run without a separate Python installation and
 without a separate Microsoft VC++ Redistributable installation. The converter
@@ -246,15 +269,19 @@ Bundled:
   - ONNX Runtime DirectML, OpenCV, NumPy, Pillow
   - FFmpeg / ffprobe
   - Depth Anything V2 model
+  - SEA-RAFT CUDA runtime, official SEA-RAFT checkout and Spring-S/M model cache
   - the manually imported nvngx_dlssnr.dll
+  - the official NVIDIA DLSS Frame Generation runtime nvngx_dlssg.dll
 
 Not bundled:
   - NVIDIA display driver (required on the target PC)
   - NVIDIA Optical Flow SDK headers (build-time only)
   - nvofapi64.dll (provided by the NVIDIA driver)
 
-NVOF requires a supported NVIDIA GPU/driver. Run "Crow-DLSS5-Video-Image-Converter-NVOF-Self-Test.exe"
-and "Crow-DLSS5-Video-Image-Converter-NVOF-Execute-Self-Test.exe" on a new PC if NVOF availability is in doubt.
+NVOF requires a supported NVIDIA GPU/driver. Run:
+  tools\Crow-DLSS-Rendering-Tool-NVOF-Self-Test.exe
+  tools\Crow-DLSS-Rendering-Tool-NVOF-Execute-Self-Test.exe
+on a new PC if NVOF availability is in doubt.
 
 The entire folder may be moved to another drive/path. Do not move individual
 runtime subfolders away from the EXEs.

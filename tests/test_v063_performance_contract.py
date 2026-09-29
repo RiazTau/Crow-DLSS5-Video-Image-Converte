@@ -12,7 +12,7 @@ parallel = (ROOT / "src" / "video" / "ParallelRows.h").read_text(encoding="utf-8
 converter = (ROOT / "src" / "video" / "VideoConverter.cpp").read_text(encoding="utf-8")
 cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
 
-assert any(v in cmake for v in ["VERSION 0.6.3", "VERSION 0.6.4", "VERSION 0.6.5", "VERSION 0.6.5.1", "VERSION 0.6.5.2", "VERSION 0.6.5.3", "VERSION 0.6.6"])
+assert any(v in cmake for v in ["VERSION 0.6.3", "VERSION 0.6.4", "VERSION 0.6.5", "VERSION 0.6.5.1", "VERSION 0.6.5.2", "VERSION 0.6.5.3", "VERSION 0.6.6", "VERSION 0.7.1", "VERSION 0.7.2", "VERSION 0.7.3"])
 assert "DLSS5_PERF_THREADS" in parallel
 assert "std::jthread" in parallel
 assert "ParallelForRows" in denoiser

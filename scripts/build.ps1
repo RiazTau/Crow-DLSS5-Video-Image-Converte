@@ -4,6 +4,7 @@
     [string]$NgxSdkDir = "",
     [string]$TinyExrDir = "",
     [string]$NvofSdkDir = "",
+    [string]$NvapiSdkDir = "",
     [switch]$Portable,
     [ValidateRange(1,10)][int]$Retries = 3
 )
@@ -20,11 +21,31 @@ $Downloads = Join-Path $Deps "downloads"
 function Invoke-NativeChecked {
     param(
         [Parameter(Mandatory=$true)][string]$Exe,
-        [string[]]$Arguments = @()
+        [string[]]$Arguments = @(),
+        [string]$LogFile = ""
     )
-    & $Exe @Arguments
-    $code = $LASTEXITCODE
+    Write-Host ('> ' + $Exe + ' ' + ($Arguments -join ' ')) -ForegroundColor DarkGray
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        if ($LogFile) {
+            $logDir = Split-Path -Parent $LogFile
+            if ($logDir) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+            & $Exe @Arguments 2>&1 | Tee-Object -FilePath $LogFile -Append
+        } else {
+            & $Exe @Arguments
+        }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($code -ne 0) {
+        if ($LogFile -and (Test-Path $LogFile)) {
+            Write-Host ""
+            Write-Host ("=== Last 120 lines: " + $LogFile + " ===") -ForegroundColor Yellow
+            Get-Content -LiteralPath $LogFile -Tail 120 | ForEach-Object { Write-Host $_ }
+            Write-Host "=== End compiler diagnostic tail ===" -ForegroundColor Yellow
+        }
         $joined = ($Arguments -join " ")
         throw "$Exe $joined failed with exit code $code"
     }
@@ -37,6 +58,14 @@ function Test-NgxSdk {
     $lib1 = Join-Path $Path "lib\Windows_x86_64\x64\nvsdk_ngx_d.lib"
     $lib2 = Join-Path $Path "lib\Windows_x86_64\x86_64\nvsdk_ngx_d.lib"
     return (Test-Path $header) -and ((Test-Path $lib1) -or (Test-Path $lib2))
+}
+
+function Test-NvapiSdk {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    return (Test-Path (Join-Path $Path "nvapi.h")) -and
+           (Test-Path (Join-Path $Path "NvApiDriverSettings.h")) -and
+           (Test-Path (Join-Path $Path "amd64\nvapi64.lib"))
 }
 
 function Test-TinyExr {
@@ -159,6 +188,12 @@ if ($TinyExrDir) {
 } else {
     $Tiny = Join-Path $Deps "tinyexr"
 }
+if ($NvapiSdkDir) {
+    $Nvapi = (Resolve-Path $NvapiSdkDir).Path
+    Write-Host "Using supplied NVAPI SDK: $Nvapi"
+} else {
+    $Nvapi = Join-Path $Deps "NVIDIA-nvapi"
+}
 
 $Nvof = ''
 if ($NvofSdkDir) {
@@ -173,7 +208,7 @@ if ($NvofSdkDir) {
     }
 }
 if ($Nvof) { Write-Host "Using NVIDIA Optical Flow SDK: $Nvof" }
-else { Write-Host 'NVOF SDK not configured; NVOF runtime probe/foundation will still build.' -ForegroundColor Yellow }
+else { throw 'NVIDIA Optical Flow SDK 5.x is a required build prerequisite in V0.7.2. Launch BUILD.bat and complete the mandatory NVOF selection step.' }
 
 
 if (-not (Test-NgxSdk $Ngx)) {
@@ -217,9 +252,31 @@ Manual fallback:
     }
 }
 
+$NvapiEnabled = Test-NvapiSdk $Nvapi
+if (-not $NvapiEnabled) {
+    if ($NvapiSdkDir) {
+        Write-Warning "The supplied NVAPI SDK directory is incomplete: $Nvapi"
+    } else {
+        Write-Host "Trying optional NVIDIA NVAPI SDK download for FG model presets..." -ForegroundColor Cyan
+        $ok = Clone-WithRetry -Repository "https://github.com/NVIDIA/nvapi.git" -Destination $Nvapi -Attempts $Retries
+        if (-not $ok) {
+            $ok = Download-ZipFallback -Url "https://codeload.github.com/NVIDIA/nvapi/zip/refs/heads/main" -Destination $Nvapi -ExpectedRootPattern "nvapi-*"
+        }
+        $NvapiEnabled = $ok -and (Test-NvapiSdk $Nvapi)
+    }
+    if (-not $NvapiEnabled) {
+        Write-Warning "NVAPI SDK unavailable. Build will CONTINUE normally with FG Model Preset locked to Driver Default."
+        Write-Warning "NR, FG/MFG, External EXR Motion/Depth and all core conversion features remain enabled."
+        Write-Warning "To enable Preset A/B/Latest later, provide the current NVIDIA/nvapi SDK with -NvapiSdkDir and rebuild."
+        $Nvapi = ''
+    }
+}
+
 Write-Host "Dependency validation: PASS" -ForegroundColor Green
 Write-Host "  NGX SDK : $Ngx"
 Write-Host "  TinyEXR : $Tiny"
+if ($NvapiEnabled) { Write-Host "  NVAPI   : $Nvapi (FG preset override enabled)" -ForegroundColor Green }
+else { Write-Host "  NVAPI   : unavailable (optional; Driver Default only)" -ForegroundColor Yellow }
 
 # V0.5 AutoBuild: pin the Visual Studio generator explicitly.
 # Without -G, CMake can inherit/select NMake Makefiles, which does not accept -A x64.
@@ -231,30 +288,48 @@ $configureArgs = @(
     "-DNGX_SDK_DIR=$Ngx",
     "-DTINYEXR_DIR=$Tiny"
 )
+if ($NvapiEnabled) { $configureArgs += "-DNVAPI_SDK_DIR=$Nvapi" }
 if ($Nvof) { $configureArgs += "-DNVOF_SDK_DIR=$Nvof" }
 if ($Portable) {
     $configureArgs += "-DDLSS5_PORTABLE_BUILD=ON"
     Write-Host "Portable build requested: /MD retained for NVIDIA NGX; app-local VC143 CRT packaging required." -ForegroundColor Cyan
 }
-Invoke-NativeChecked -Exe "cmake" -Arguments $configureArgs
+$cmakeConfigureLog = Join-Path $Root "logs\cmake-configure.log"
+$cmakeBuildLog = Join-Path $Root ("logs\cmake-build-" + $Configuration.ToLowerInvariant() + ".log")
+Remove-Item -LiteralPath $cmakeConfigureLog,$cmakeBuildLog -Force -ErrorAction SilentlyContinue
+Invoke-NativeChecked -Exe "cmake" -Arguments $configureArgs -LogFile $cmakeConfigureLog
 
 $buildArgs = @(
     "--build", $Build,
     "--config", $Configuration,
-    "--parallel"
+    "--parallel",
+    "--verbose",
+    "--target",
+    "crow-cli",
+    "crow-image-gui",
+    "crow-runtime-selftest",
+    "crow-nvof-selftest",
+    "crow-nvof-execute-selftest",
+    "crow-video-gui",
+    "crow-fg-gui"
 )
-Invoke-NativeChecked -Exe "cmake" -Arguments $buildArgs
+Invoke-NativeChecked -Exe "cmake" -Arguments $buildArgs -LogFile $cmakeBuildLog
 
-$Cli = Join-Path $Dist "Crow-DLSS5-Video-Image-Converter-CLI.exe"
-$Gui = Join-Path $Dist "Crow-DLSS5-Video-Image-Converter-Image.exe"
-$VideoGui = Join-Path $Dist "Crow-DLSS5-Video-Image-Converter-Video.exe"
-$NvofSelfTest = Join-Path $Dist "Crow-DLSS5-Video-Image-Converter-NVOF-Self-Test.exe"
+$ToolsDist = Join-Path $Dist "tools"
+$Cli = Join-Path $ToolsDist "Crow-DLSS-Rendering-Tool-CLI.exe"
+$Gui = Join-Path $Dist "Crow-DLSS-Rendering-Tool-Image.exe"
+$VideoGui = Join-Path $Dist "Crow-DLSS-Rendering-Tool.exe"
+$NvofSelfTest = Join-Path $ToolsDist "Crow-DLSS-Rendering-Tool-NVOF-Self-Test.exe"
+$FgGui = Join-Path $ToolsDist "Crow-DLSS-Rendering-Tool-FG-Diagnostic.exe"
 if (-not (Test-Path $Cli)) { throw "Expected executable was not produced: $Cli" }
 if (-not (Test-Path $Gui)) { throw "Expected GUI executable was not produced: $Gui" }
 if (-not (Test-Path $VideoGui)) { throw "Expected video GUI executable was not produced: $VideoGui" }
 if (-not (Test-Path $NvofSelfTest)) { throw "Expected NVOF self-test executable was not produced: $NvofSelfTest" }
+if (-not (Test-Path $FgGui)) { throw "Expected standalone FG executable was not produced: $FgGui" }
 Write-Host "Build complete:" -ForegroundColor Green
 Write-Host "  CLI      : $Cli"
 Write-Host "  Image GUI: $Gui"
 Write-Host "  Video GUI: $VideoGui"
 Write-Host "  NVOF test: $NvofSelfTest"
+Write-Host "  FG diagnostic: $FgGui"
+& (Join-Path $PSScriptRoot "finalize_dist.ps1")

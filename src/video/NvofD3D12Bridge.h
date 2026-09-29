@@ -14,7 +14,9 @@ struct NvofNativeFrameResult {
     uint32_t gridWidth = 0;
     uint32_t gridHeight = 0;
     std::vector<NvofPackedVector> forward;
+    std::vector<NvofPackedVector> backward;
     std::vector<uint8_t> forwardCost;
+    std::vector<uint8_t> backwardCost;
 };
 
 // Thin ownership wrapper around the NVIDIA Optical Flow SDK 5.x D3D12 API.

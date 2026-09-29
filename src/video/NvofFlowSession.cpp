@@ -66,7 +66,7 @@ bool NvofFlowSession::NativeBackendCompiled() noexcept {
 
 std::wstring NvofFlowSession::BuildStatusText() {
 #if !DLSS5_HAS_NVOF_SDK
-    return L"NVOF SDK headers were not supplied at configure time. Run NVOF_SDK_SETUP.bat, then rebuild.";
+    return L"NVOF SDK headers were not supplied at configure time. Run BUILD.bat and choose any build option [1]-[6]; the required NVOF SDK setup will run before compilation.";
 #elif !DLSS5_NVOF_D3D12_BRIDGE_READY
     return L"NVOF SDK headers were found, but the SDK 5.x D3D12 ABI compile probe failed. Check the selected Optical Flow SDK package and MSVC/Windows SDK, then rebuild.";
 #else
@@ -85,7 +85,7 @@ NvofFlowSession::NvofFlowSession(D3D12Context& d3d,
     if (!_sourceWidth || !_sourceHeight) throw std::runtime_error("NVOF source dimensions are invalid");
     const auto runtime = ProbeNvofRuntime();
     if (!runtime.moduleLoaded || !runtime.d3d12EntryPoint) {
-        throw std::runtime_error("NVIDIA Optical Flow D3D12 runtime is unavailable. Update the NVIDIA display driver and run Crow-DLSS5-Video-Image-Converter-NVOF-Self-Test.exe.");
+        throw std::runtime_error("NVIDIA Optical Flow D3D12 runtime is unavailable. Update the NVIDIA display driver and run Crow-DLSS-Rendering-Tool-NVOF-Self-Test.exe.");
     }
     if (!NativeBackendCompiled()) {
         const auto text = BuildStatusText();
@@ -125,11 +125,15 @@ TemporalFlowResult NvofFlowSession::Process(const Rgba8Image& frame) {
     pp.gridWidth = native.gridWidth;
     pp.gridHeight = native.gridHeight;
     pp.forward = &native.forward;
+    pp.backward = native.backward.empty() ? nullptr : &native.backward;
     pp.forwardCost = native.forwardCost.empty() ? nullptr : &native.forwardCost;
+    pp.backwardCost = native.backwardCost.empty() ? nullptr : &native.backwardCost;
     pp.previousFrame = &_previous;
     pp.currentFrame = &frame;
     pp.sceneCutScore = score;
     pp.sceneCut = false;
+    pp.flowGridSize = _settings.outputGridSize;
+    pp.reliabilityMode = _settings.reliability;
     TemporalFlowResult result = PostprocessNvofFlow(pp);
 
     _previous = frame;

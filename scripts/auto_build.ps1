@@ -1,5 +1,6 @@
 ﻿param(
     [switch]$SkipAutoDepth,
+    [switch]$SkipSeaRaft,
     [switch]$SkipVideo,
     [switch]$SkipRuntimePrompt,
     [switch]$NoInstall,
@@ -42,8 +43,14 @@ function Refresh-ProcessPath {
 function Invoke-NativeChecked {
     param([Parameter(Mandatory=$true)][string]$Exe,[string[]]$Arguments=@(),[switch]$Allow3010)
     Write-Host ('> ' + $Exe + ' ' + ($Arguments -join ' ')) -ForegroundColor DarkGray
-    & $Exe @Arguments
-    $code = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Exe @Arguments
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($Allow3010 -and ($code -eq 3010)) { return }
     if ($code -ne 0) { throw "$Exe failed with exit code $code" }
 }
@@ -71,7 +78,7 @@ function Ensure-Winget {
     throw @'
 winget is required for automatic installation of missing build tools.
 The Microsoft Store App Installer page has been opened when possible.
-Install/update "App Installer", reopen this package, and run AUTO_BUILD.bat again.
+Install/update "App Installer", reopen this package, and run BUILD.bat (Full build - Official/global) again.
 '@
 }
 
@@ -88,7 +95,7 @@ function Ensure-WingetPackage {
     Invoke-NativeChecked -Exe $winget -Arguments $args
     Refresh-ProcessPath
     if ($CommandName -and -not (Get-Command $CommandName -ErrorAction SilentlyContinue)) {
-        throw "$DisplayName installation completed, but '$CommandName' is still not visible. Close this console and rerun AUTO_BUILD.bat."
+        throw "$DisplayName installation completed, but '$CommandName' is still not visible. Close this console and rerun BUILD.bat (Full build - Official/global)."
     }
     Write-Ok "$DisplayName installed."
 }
@@ -115,7 +122,7 @@ Open Visual Studio Installer -> Build Tools 2022 -> Modify, then install:
   - MSVC v143 C++ x64/x86 build tools
   - Windows 10/11 SDK
   - C++ CMake tools for Windows
-Then rerun AUTO_BUILD.bat.
+Then rerun BUILD.bat (Full build - Official/global).
 '@
     }
     Write-Ok 'Visual Studio 2022 C++ Build Tools installed.'
@@ -143,7 +150,7 @@ function Ensure-Python {
     Refresh-ProcessPath
     $v = Get-PythonVersion
     if (-not $v -or $v -lt [version]'3.11') {
-        throw 'Python installation completed, but Python 3.11+ is still unavailable in PATH. Close this console and rerun AUTO_BUILD.bat.'
+        throw 'Python installation completed, but Python 3.11+ is still unavailable in PATH. Close this console and rerun BUILD.bat (Full build - Official/global).'
     }
     Write-Ok "Python $v installed."
 }
@@ -192,7 +199,7 @@ function Show-GpuAndDriverStatus {
         if (-not $hasDriverVersion) {
             Write-Warn 'NVIDIA display driver appears to be missing. Driver installation is intentionally manual.'
             try { Start-Process 'https://www.nvidia.com/Download/index.aspx' | Out-Null } catch {}
-            throw 'Install the NVIDIA display driver from the NVIDIA page that was opened, reboot Windows, then rerun AUTO_BUILD.bat.'
+            throw 'Install the NVIDIA display driver from the NVIDIA page that was opened, reboot Windows, then rerun BUILD.bat (Full build - Official/global).'
         }
     }
     $names = ($nvidia | ForEach-Object Name) -join ' / '
@@ -206,11 +213,12 @@ function Show-GpuAndDriverStatus {
 function Select-DlssNrRuntime {
     if ($SkipRuntimePrompt) { return $null }
     Write-Step 'Select DLSSNR runtime'
+    Write-Warn 'RTX 40-series users must select the special DLSSNR runtime version intended for RTX 40-series. Other users should select the standard DLSSNR runtime.'
     try {
         Add-Type -AssemblyName System.Windows.Forms
         $dialog = New-Object System.Windows.Forms.OpenFileDialog
         $dialog.Filter = 'NVIDIA DLSS Neural Rendering runtime (nvngx_dlssnr.dll)|nvngx_dlssnr.dll|DLL files (*.dll)|*.dll'
-        $dialog.Title = 'Select nvngx_dlssnr.dll for Crow-DLSS5-Video-Image-Converter'
+        $dialog.Title = 'Select nvngx_dlssnr.dll for Crow - DLSS Rendering Tool'
         $dialog.InitialDirectory = $Root
         $dialog.CheckFileExists = $true
         $dialog.Multiselect = $false
@@ -243,28 +251,29 @@ try {
 } catch {}
 
 try {
-    Write-Host 'Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2 - Native NVOF D3D12 Execute / Adaptive Stable Motion - Automatic Build Bootstrap' -ForegroundColor White
+    Write-Host 'Crow - DLSS Rendering Tool V0.7.3-alpha1 - SEA-RAFT Tunable Neural Motion + MFG + External Guidance - Automatic Build Bootstrap' -ForegroundColor White
     Write-Host "Project: $Root"
     Write-Host "Log    : $LogPath"
 
-    # AUTO_BUILD.bat already launches with -ExecutionPolicy Bypass. This makes the
+    # BUILD.bat (Full build - Official/global) already launches with -ExecutionPolicy Bypass. This makes the
     # current process explicit without permanently changing CurrentUser/LocalMachine.
     try {
         Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop
         Write-Ok 'PowerShell execution policy for this process: Bypass'
     } catch {
         Write-Warn ('Could not set Process execution policy: ' + $_.Exception.Message)
-        Write-Warn 'AUTO_BUILD.bat also uses -ExecutionPolicy Bypass. If Group Policy blocks scripts, use an administrator-managed exception.'
+        Write-Warn 'BUILD.bat (Full build - Official/global) also uses -ExecutionPolicy Bypass. If Group Policy blocks scripts, use an administrator-managed exception.'
     }
 
     if (-not $NoElevation -and -not (Test-Administrator)) {
         Write-Step 'Administrator permission required'
-        Write-Host 'Build tool / VC++ runtime installation may require elevation. Requesting UAC... (AUTO_BUILD.bat normally handles this before PowerShell starts.)'
+        Write-Host 'Build tool / VC++ runtime installation may require elevation. Requesting UAC... (BUILD.bat (Full build - Official/global) normally handles this before PowerShell starts.)'
         $shell = (Get-Process -Id $PID).Path
         if (-not $shell) { $shell = 'powershell.exe' }
         $argList = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',('"' + $PSCommandPath + '"'),'-NoElevation')
         if ($Portable) { $argList += '-Portable' }
         if ($SkipAutoDepth) { $argList += '-SkipAutoDepth' }
+        if ($SkipSeaRaft) { $argList += '-SkipSeaRaft' }
         if ($SkipVideo) { $argList += '-SkipVideo' }
         if ($SkipRuntimePrompt) { $argList += '-SkipRuntimePrompt' }
         if ($NoInstall) { $argList += '-NoInstall' }
@@ -274,7 +283,7 @@ try {
         } catch {
             throw @'
 Administrator elevation was cancelled or failed.
-Run AUTO_BUILD.bat as Administrator, or run:
+Run BUILD.bat (Full build - Official/global) as Administrator, or run:
   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\auto_build.ps1
 from an elevated PowerShell window.
 '@
@@ -303,6 +312,9 @@ from an elevated PowerShell window.
 
     # Let the user choose the proprietary/experimental runtime. The project does
     # not download it automatically.
+    Write-Step 'Mandatory NVIDIA Optical Flow SDK prerequisite'
+    & (Join-Path $Root 'scripts\setup_nvof_sdk.ps1') -Required -PreferSaved
+
     $runtime = Select-DlssNrRuntime
 
     Write-Step 'Compiling source'
@@ -318,6 +330,9 @@ from an elevated PowerShell window.
         Write-Step 'Importing selected DLSSNR runtime'
         & (Join-Path $Root 'scripts\import_runtime.ps1') -Source $runtime
     }
+
+    Write-Step 'Resolving required NVIDIA DLSS-G runtime'
+    & (Join-Path $Root 'scripts\setup_fg_runtime.ps1') -Required
 
     if (-not $SkipVideo) {
         Write-Step 'Setting up FFmpeg for video converter'
@@ -337,11 +352,23 @@ from an elevated PowerShell window.
         if ($LASTEXITCODE -ne 0) { throw "Auto Depth / Temporal setup failed with exit code $LASTEXITCODE" }
     }
 
+    if (-not $SkipSeaRaft) {
+        Write-Step 'Setting up SEA-RAFT Neural Motion runtime'
+        $seaSetup = Join-Path $Root 'dist\sea_raft\setup_sea_raft.ps1'
+        if (-not (Test-Path $seaSetup)) { throw "SEA-RAFT setup script was not copied to dist: $seaSetup" }
+        Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $seaSetup) 'china-mirror.flag') -Force -ErrorAction SilentlyContinue
+        # setup_sea_raft.ps1 throws on fatal runtime failures. Do not inspect the ambient
+        # $LASTEXITCODE here: an optional model-prefetch retry can leave a stale native exit code.
+        & $seaSetup
+    }
+
+    & (Join-Path $Root 'scripts\finalize_dist.ps1')
+
     Write-Step 'Final verification'
     $required = @(
-        (Join-Path $Root 'dist\Crow-DLSS5-Video-Image-Converter-CLI.exe'),
-        (Join-Path $Root 'dist\Crow-DLSS5-Video-Image-Converter-Image.exe'),
-        (Join-Path $Root 'dist\Crow-DLSS5-Video-Image-Converter-Video.exe')
+        (Join-Path $Root 'dist\tools\Crow-DLSS-Rendering-Tool-CLI.exe'),
+        (Join-Path $Root 'dist\Crow-DLSS-Rendering-Tool-Image.exe'),
+        (Join-Path $Root 'dist\Crow-DLSS-Rendering-Tool.exe')
     )
     foreach ($f in $required) {
         if (-not (Test-Path $f)) { throw "Missing compiled output: $f" }
@@ -350,12 +377,15 @@ from an elevated PowerShell window.
     $runtimeDest = Join-Path $Root 'dist\runtime\nvngx_dlssnr.dll'
     if (Test-Path $runtimeDest) { Write-Ok "DLSSNR runtime: $runtimeDest" }
     else { Write-Warn 'DLSSNR runtime was not imported. Run scripts\import_runtime.ps1 before processing.' }
+    $dlssgRuntime = Join-Path $Root 'dist\runtime\nvngx_dlssg.dll'
+    if (-not (Test-Path $dlssgRuntime)) { throw "Required DLSS-G runtime is missing after build: $dlssgRuntime" }
+    Write-Ok "DLSS-G runtime: $dlssgRuntime"
 
     Write-Host ''
     Write-Host '============================================================' -ForegroundColor Green
     Write-Host 'AUTOMATIC BUILD COMPLETE' -ForegroundColor Green
-    Write-Host 'Image GUI: dist\Crow-DLSS5-Video-Image-Converter-Image.exe'
-    Write-Host 'Video GUI: dist\Crow-DLSS5-Video-Image-Converter-Video.exe'
+    Write-Host 'Image GUI: dist\Crow-DLSS-Rendering-Tool-Image.exe'
+    Write-Host 'Video GUI: dist\Crow-DLSS-Rendering-Tool.exe'
     Write-Host "Log      : $LogPath"
     Write-Host '============================================================' -ForegroundColor Green
     exit 0

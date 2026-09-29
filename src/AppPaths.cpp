@@ -1,4 +1,4 @@
-#include "AppPaths.h"
+﻿#include "AppPaths.h"
 #include <Windows.h>
 #include <stdexcept>
 #include <vector>
@@ -13,6 +13,11 @@ std::filesystem::path ExecutablePath() {
     return std::filesystem::path(buffer.data(), buffer.data() + len);
 }
 std::filesystem::path ExecutableDir() { return ExecutablePath().parent_path(); }
-std::filesystem::path DefaultRuntimeDll() { return ExecutableDir() / L"runtime" / L"nvngx_dlssnr.dll"; }
-std::filesystem::path DefaultDepthModel() { return ExecutableDir() / L"models" / L"depth_anything_v2" / L"model_fp16.onnx"; }
+std::filesystem::path DistributionRoot() {
+    const auto dir = ExecutableDir();
+    if (dir.filename() == L"tools") return dir.parent_path();
+    return dir;
+}
+std::filesystem::path DefaultRuntimeDll() { return DistributionRoot() / L"runtime" / L"nvngx_dlssnr.dll"; }
+std::filesystem::path DefaultDepthModel() { return DistributionRoot() / L"models" / L"depth_anything_v2" / L"model_fp16.onnx"; }
 }

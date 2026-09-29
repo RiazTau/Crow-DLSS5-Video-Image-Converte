@@ -2,12 +2,14 @@
     [string]$Configuration = "Release",
     [string]$NgxSdkDir = "",
     [string]$TinyExrDir = "",
-    [string]$NvofSdkDir = ""
+    [string]$NvofSdkDir = "",
+    [string]$NvapiSdkDir = ""
 )
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Ngx = if ($NgxSdkDir) { (Resolve-Path $NgxSdkDir).Path } else { Join-Path $Root ".deps\NVIDIA-DLSS" }
 $Tiny = if ($TinyExrDir) { (Resolve-Path $TinyExrDir).Path } else { Join-Path $Root ".deps\tinyexr" }
+$Nvapi = if ($NvapiSdkDir) { (Resolve-Path $NvapiSdkDir).Path } else { Join-Path $Root ".deps\NVIDIA-nvapi" }
 
 $Nvof = ''
 if ($NvofSdkDir) {
@@ -22,7 +24,7 @@ if ($NvofSdkDir) {
     }
 }
 if ($Nvof) { Write-Host "Using NVIDIA Optical Flow SDK: $Nvof" }
-else { Write-Host 'NVOF SDK not configured; NVOF runtime probe/foundation will still build.' -ForegroundColor Yellow }
+else { throw 'NVIDIA Optical Flow SDK 5.x is required. Launch BUILD.bat and complete the mandatory NVOF prerequisite step.' }
 
 
 if (-not (Test-Path (Join-Path $Ngx "include\nvsdk_ngx.h"))) {
@@ -30,6 +32,12 @@ if (-not (Test-Path (Join-Path $Ngx "include\nvsdk_ngx.h"))) {
 }
 if (-not (Test-Path (Join-Path $Tiny "tinyexr.h"))) {
     throw "TinyEXR is missing or incomplete: $Tiny. Run .\scripts\build.ps1 first."
+}
+$NvapiEnabled = (Test-Path (Join-Path $Nvapi "nvapi.h")) -and
+                (Test-Path (Join-Path $Nvapi "NvApiDriverSettings.h")) -and
+                (Test-Path (Join-Path $Nvapi "amd64\nvapi64.lib"))
+if (-not $NvapiEnabled) {
+    Write-Warning "NVAPI SDK is missing/incomplete: $Nvapi. Continuing without optional FG model preset overrides."
 }
 
 $Build = Join-Path $Root "build"
@@ -40,6 +48,7 @@ $cmakeArgs = @(
     "-DNGX_SDK_DIR=$Ngx",
     "-DTINYEXR_DIR=$Tiny"
 )
+if ($NvapiEnabled) { $cmakeArgs += "-DNVAPI_SDK_DIR=$Nvapi" }
 if ($Nvof) { $cmakeArgs += "-DNVOF_SDK_DIR=$Nvof" }
 & cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed with exit code $LASTEXITCODE" }

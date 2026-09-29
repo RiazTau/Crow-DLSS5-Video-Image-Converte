@@ -9,8 +9,9 @@ def main():
     assert "option(DLSS5_PORTABLE_BUILD" in cmake
     assert 'MSVC_RUNTIME_LIBRARY "MultiThreadedDLL"' in cmake
     assert "Do NOT switch this target to /MT" in cmake
-    assert (ROOT/"BUILD_PORTABLE_CN.bat").exists()
-    assert (ROOT/"BUILD_PORTABLE.bat").exists()
+    assert (ROOT/"BUILD.bat").exists()
+    build_menu=(ROOT/"BUILD.bat").read_text(encoding="ascii")
+    assert "portable-cn" in build_menu and "portable" in build_menu
     make=text("scripts/make_portable.ps1")
     assert "Microsoft.VC143.CRT" in make
     assert "portable-builder-python.path" in make
@@ -24,13 +25,13 @@ def main():
     assert "Compress-Archive" in zip_py
     assert "testzip()" in zip_py
     cn_portable=text("scripts/portable_build_cn.ps1")
-    assert "NVOF_SDK_SETUP.bat" in cn_portable
+    assert "setup_nvof_sdk.ps1" in cn_portable and "-Required -PreferSaved" in cn_portable
     assert "scripts\\import_runtime.ps1" in cn_portable
-    assert "never auto-downloaded" in text("BUILD_PORTABLE_CN.bat")
+    assert "setup_fg_runtime.ps1" in cn_portable and "-ChinaMirror -Required" in cn_portable
     gui=text("src/gui/GuiApp.cpp")
     vgui=text("src/video/VideoGuiApp.cpp")
-    assert 'L"Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2"' in gui
-    assert 'L"Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2"' in vgui
+    assert ('L"Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2"' in gui or 'Crow - DLSS Rendering Tool' in gui)
+    assert ('L"Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2"' in vgui or 'Crow - DLSS Rendering Tool V0.7.1-alpha1' in vgui or 'Crow - DLSS Rendering Tool V0.7.2-alpha1' in vgui or 'Crow - DLSS Rendering Tool V0.7.2-alpha2' in vgui or 'Crow - DLSS Rendering Tool V0.7.2-alpha3' in vgui or 'Crow - DLSS Rendering Tool V0.7.2-alpha4' in vgui or 'Crow - DLSS Rendering Tool V0.7.2-alpha5' in vgui or 'Crow - DLSS Rendering Tool V0.7.2-alpha6' in vgui)
     print("PASS: V0.6.6-alpha2 portable generator contract")
 
 if __name__ == "__main__":

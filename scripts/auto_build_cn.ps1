@@ -1,5 +1,6 @@
 ﻿param(
     [switch]$SkipAutoDepth,
+    [switch]$SkipSeaRaft,
     [switch]$SkipVideo,
     [switch]$SkipRuntimePrompt,
     [switch]$NoInstall,
@@ -41,8 +42,19 @@ function Add-PathFront([string]$Path) {
 function Invoke-NativeChecked {
     param([Parameter(Mandatory=$true)][string]$Exe,[string[]]$Arguments=@(),[int[]]$AllowedExitCodes=@(0))
     Write-Host ('> ' + $Exe + ' ' + ($Arguments -join ' ')) -ForegroundColor DarkGray
-    & $Exe @Arguments
-    $code = $LASTEXITCODE
+    # PowerShell 5.1 turns native-process stderr (including ordinary CMake WARNING lines)
+    # into NativeCommandError records. With the script-wide ErrorActionPreference=Stop that
+    # incorrectly aborts a healthy CMake configure before we can inspect its real exit code.
+    # Native tools are authoritative through their process exit code, so temporarily keep
+    # stderr non-terminating while preserving it in the console/transcript.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Exe @Arguments
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($AllowedExitCodes -notcontains $code) { throw "$Exe failed with exit code $code" }
 }
 
@@ -106,7 +118,7 @@ function Ensure-PythonCN {
     if ($p.ExitCode -ne 0) { throw "Python installer failed with exit code $($p.ExitCode)." }
     Refresh-ProcessPath
     $found = Get-PythonCandidate
-    if (-not $found) { throw 'Python installation completed, but Python 3.11+ could not be located. Close this console and run AUTO_BUILD_CN.bat again.' }
+    if (-not $found) { throw 'Python installation completed, but Python 3.11+ could not be located. Close this console and run BUILD.bat (Full build - CN mirrors) again.' }
     Add-PathFront (Split-Path -Parent $found.Path)
     Write-Ok ("Python {0} installed from USTC mirror." -f $found.Version)
     return $found.Path
@@ -221,7 +233,7 @@ Install it manually from Microsoft, then select:
   - MSVC v143 C++ x64/x86 build tools
   - Windows 10/11 SDK
   - C++ CMake tools for Windows (optional; this script also provides CMake)
-After installation, run AUTO_BUILD_CN.bat again.
+After installation, run BUILD.bat (Full build - CN mirrors) again.
 '@
 }
 
@@ -242,7 +254,7 @@ function Require-VcRuntimeManual {
     throw @'
 Microsoft Visual C++ x64 Redistributable 14.44+ is required.
 This proprietary runtime has no trusted public mainland mirror configured by this package, so automatic mirror download is disabled.
-The official Microsoft guidance page was opened. Download/install the x64 redistributable manually, reboot if requested, then run AUTO_BUILD_CN.bat again.
+The official Microsoft guidance page was opened. Download/install the x64 redistributable manually, reboot if requested, then run BUILD.bat (Full build - CN mirrors) again.
 '@
 }
 
@@ -271,7 +283,7 @@ function Show-GpuAndDriverStatus {
             throw @'
 NVIDIA display driver appears to be missing.
 GPU drivers are intentionally a manual-install exception in CN-mirror mode.
-Install the NVIDIA driver from NVIDIA China, reboot Windows, then run AUTO_BUILD_CN.bat again.
+Install the NVIDIA driver from NVIDIA China, reboot Windows, then run BUILD.bat (Full build - CN mirrors) again.
 '@
         }
         Write-Warn 'nvidia-smi was not found, but WMI reports an NVIDIA driver version. Continuing.'
@@ -286,13 +298,13 @@ Install the NVIDIA driver from NVIDIA China, reboot Windows, then run AUTO_BUILD
 
 function Select-DlssNrRuntime {
     if ($SkipRuntimePrompt) { return $null }
-    Write-Step 'Select optional stable DLSSNR runtime'
-    Write-Warn 'RTX40 experimental runtime users: CANCEL this picker and run RTX40_RUNTIME_IMPORT.bat after AutoBuild completes.'
+    Write-Step 'Select DLSSNR runtime'
+    Write-Warn 'RTX 40-series users must select the special DLSSNR runtime version intended for RTX 40-series. Other users should select the standard DLSSNR runtime.'
     try {
         Add-Type -AssemblyName System.Windows.Forms
         $dialog = New-Object System.Windows.Forms.OpenFileDialog
         $dialog.Filter = 'NVIDIA DLSS Neural Rendering runtime (nvngx_dlssnr.dll)|nvngx_dlssnr.dll|DLL files (*.dll)|*.dll'
-        $dialog.Title = 'Optional stable runtime import - RTX40 experimental users should Cancel'
+        $dialog.Title = 'Select DLSSNR runtime - RTX 40-series users require the special version'
         $dialog.InitialDirectory = $Root
         $dialog.CheckFileExists = $true
         $dialog.Multiselect = $false
@@ -321,11 +333,11 @@ function Select-DlssNrRuntime {
 try { Start-Transcript -Path $LogPath -Append | Out-Null } catch {}
 
 try {
-    Write-Host 'Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2 - Native NVOF D3D12 Execute / Adaptive Stable Motion - Mainland China Mirror AutoBuild' -ForegroundColor White
+    Write-Host 'Crow - DLSS Rendering Tool V0.7.3-alpha1 - SEA-RAFT Tunable Neural Motion + MFG + External Guidance - Mainland China Mirror AutoBuild' -ForegroundColor White
     Write-Host "Project: $Root"
     Write-Host "Log    : $LogPath"
-    Write-Host 'Automatic download policy: USTC / Gitee / npmmirror / hf-mirror only.'
-    Write-Host 'Manual exceptions: Visual Studio/Windows SDK, VC++ runtime, NVIDIA driver, nvngx_dlssnr.dll.'
+    Write-Host 'Mirror-first policy: USTC / Gitee / GitCode / npmmirror / hf-mirror. CUDA PyTorch uses the official PyTorch CUDA wheel channel when a mirror is not a valid pip index.'
+    Write-Host 'Manual exceptions: Visual Studio/Windows SDK, VC++ runtime, NVIDIA driver, nvngx_dlssnr.dll. Official upstream fallback may be used when a mirror is unavailable.'
     if ($Portable) { Write-Host 'Portable packaging requested: binaries stay /MD for NGX and VC143 CRT is bundled app-local during packaging.' -ForegroundColor Cyan }
 
     try {
@@ -333,7 +345,7 @@ try {
         Write-Ok 'PowerShell execution policy for this process: Bypass'
     } catch {
         Write-Warn ('Could not set Process execution policy: ' + $_.Exception.Message)
-        Write-Warn 'AUTO_BUILD_CN.bat also starts PowerShell with -ExecutionPolicy Bypass. MachinePolicy/UserPolicy cannot be overridden by this package.'
+        Write-Warn 'BUILD.bat (Full build - CN mirrors) also starts PowerShell with -ExecutionPolicy Bypass. MachinePolicy/UserPolicy cannot be overridden by this package.'
     }
 
     Write-Step 'System overview'
@@ -355,6 +367,9 @@ try {
     $pyFound = Get-PythonCandidate
     Write-Ok ("Python: {0}" -f $pyFound.Version)
 
+    Write-Step 'Mandatory NVIDIA Optical Flow SDK prerequisite'
+    & (Join-Path $Root 'scripts\setup_nvof_sdk.ps1') -Required -PreferSaved
+
     $runtime = Select-DlssNrRuntime
 
     Write-Step 'Compiling source with mainland mirror dependencies'
@@ -367,6 +382,9 @@ try {
         Write-Step 'Importing selected DLSSNR runtime'
         & (Join-Path $Root 'scripts\import_runtime.ps1') -Source $runtime
     }
+
+    Write-Step 'Resolving required NVIDIA DLSS-G runtime'
+    & (Join-Path $Root 'scripts\setup_fg_runtime.ps1') -ChinaMirror -Required
 
     if (-not $SkipVideo) {
         Write-Step 'Setting up FFmpeg from npmmirror'
@@ -402,12 +420,24 @@ try {
         & (Join-Path $Root 'scripts\setup_models_cn.ps1') -InstallRoot (Join-Path $Root 'dist')
     }
 
+    if (-not $SkipSeaRaft) {
+        Write-Step 'Setting up SEA-RAFT Neural Motion runtime from China mirrors'
+        $seaSetup = Join-Path $Root 'dist\sea_raft\setup_sea_raft.ps1'
+        if (-not (Test-Path $seaSetup)) { throw "SEA-RAFT setup script was not copied to dist: $seaSetup" }
+        New-Item -ItemType File -Force -Path (Join-Path (Split-Path -Parent $seaSetup) 'china-mirror.flag') | Out-Null
+        # setup_sea_raft.ps1 throws on fatal runtime failures. Do not inspect the ambient
+        # $LASTEXITCODE here: an optional model-prefetch retry can leave a stale native exit code.
+        & $seaSetup -ChinaMirror
+    }
+
+    & (Join-Path $Root 'scripts\finalize_dist.ps1')
+
     Write-Step 'Final verification'
     foreach ($f in @(
-        (Join-Path $Root 'dist\Crow-DLSS5-Video-Image-Converter-CLI.exe'),
-        (Join-Path $Root 'dist\Crow-DLSS5-Video-Image-Converter-Image.exe'),
-        (Join-Path $Root 'dist\Crow-DLSS5-Video-Image-Converter-Video.exe'),
-        (Join-Path $Root 'dist\Crow-DLSS5-Video-Image-Converter-Runtime-Self-Test.exe')
+        (Join-Path $Root 'dist\tools\Crow-DLSS-Rendering-Tool-CLI.exe'),
+        (Join-Path $Root 'dist\Crow-DLSS-Rendering-Tool-Image.exe'),
+        (Join-Path $Root 'dist\Crow-DLSS-Rendering-Tool.exe'),
+        (Join-Path $Root 'dist\tools\Crow-DLSS-Rendering-Tool-Runtime-Self-Test.exe')
     )) {
         if (-not (Test-Path $f)) { throw "Missing compiled output: $f" }
         Write-Ok $f
@@ -415,12 +445,15 @@ try {
     $runtimeDest = Join-Path $Root 'dist\runtime\nvngx_dlssnr.dll'
     if (Test-Path $runtimeDest) { Write-Ok "DLSSNR runtime: $runtimeDest" }
     else { Write-Warn 'DLSSNR runtime was not imported. Run scripts\import_runtime.ps1 before processing.' }
+    $dlssgRuntime = Join-Path $Root 'dist\runtime\nvngx_dlssg.dll'
+    if (-not (Test-Path $dlssgRuntime)) { throw "Required DLSS-G runtime is missing after build: $dlssgRuntime" }
+    Write-Ok "DLSS-G runtime: $dlssgRuntime"
 
     Write-Host ''
     Write-Host '============================================================' -ForegroundColor Green
     Write-Host 'MAINLAND CHINA MIRROR AUTO BUILD COMPLETE' -ForegroundColor Green
-    Write-Host 'Image GUI: dist\Crow-DLSS5-Video-Image-Converter-Image.exe'
-    Write-Host 'Video GUI: dist\Crow-DLSS5-Video-Image-Converter-Video.exe'
+    Write-Host 'Image GUI: dist\Crow-DLSS-Rendering-Tool-Image.exe'
+    Write-Host 'Video GUI: dist\Crow-DLSS-Rendering-Tool.exe'
     Write-Host "Log      : $LogPath"
     Write-Host '============================================================' -ForegroundColor Green
     exit 0

@@ -22,7 +22,7 @@ namespace {
 constexpr NVSDK_NGX_Feature kFeatureDlssNr = static_cast<NVSDK_NGX_Feature>(18);
 constexpr unsigned long long kSignedSnippetAppId = 0x0876232Cull;
 constexpr const char* kProjectId = "1b4fbf82-8544-4a4c-bb14-d59f1b86b73a";
-constexpr const char* kEngineVersion = "Crow-DLSS5-Video-Image-Converter-0.5";
+constexpr const char* kEngineVersion = "Crow-DLSS-Rendering-Tool-0.7.2-alpha2";
 
 constexpr char P_WIDTH[] = "DLSSNR.Width";
 constexpr char P_HEIGHT[] = "DLSSNR.Height";
@@ -268,16 +268,17 @@ struct DlssNrRunner::Resources {
 };
 
 DlssNrRunner::DlssNrRunner(D3D12Context& d3d, std::filesystem::path runtimeDll, DlssNrSettings settings,
-                             std::optional<RuntimeCallerMode> callerModeOverride)
+                             std::optional<RuntimeCallerMode> callerModeOverride, bool manageCoreLifetime)
     : _d3d(d3d), _runtimeDll(std::move(runtimeDll)), _runtimeDir(_runtimeDll.parent_path()), _settings(settings),
-      _runtimeCompat(LoadRuntimeCompatProfile(_runtimeDll, callerModeOverride)) {
+      _runtimeCompat(LoadRuntimeCompatProfile(_runtimeDll, callerModeOverride)),
+      _manageCoreLifetime(manageCoreLifetime) {
     if (_settings.iterations == 0) _settings.iterations = 1;
     _performanceBatching = PerformanceBatchingEnabled();
     std::cout << "[PERF] D3D12 frame batching: " << (_performanceBatching ? "ON" : "OFF (legacy sync path)") << "\n";
     if (!std::filesystem::exists(_runtimeDll)) {
         throw std::runtime_error("nvngx_dlssnr.dll not found: " + _runtimeDll.string());
     }
-    InitializeCore();
+    if (_manageCoreLifetime) InitializeCore();
     InitializeSnippet();
     AllocateParameters();
 }
@@ -748,7 +749,7 @@ void DlssNrRunner::Shutdown() noexcept {
         FreeLibrary(_snippetModule);
         _snippetModule = nullptr;
     }
-    if (_coreInitialized) {
+    if (_manageCoreLifetime && _coreInitialized) {
         DWORD sehCode = 0;
         const auto result = SafeCoreShutdown(_d3d.Device(), &sehCode);
         if (sehCode) {

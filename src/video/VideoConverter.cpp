@@ -1,4 +1,4 @@
-#include "VideoConverter.h"
+﻿#include "VideoConverter.h"
 #include "AutoDepthVideo.h"
 #include "FfmpegProcess.h"
 #include "AppPaths.h"
@@ -7,10 +7,18 @@
 #include "TemporalFlow.h"
 #include "TemporalDenoiser.h"
 #include "DisFlowVideo.h"
+#include "SeaRaftFlowSession.h"
 #include "NvofFlowSession.h"
+#include "NvofFlowPostprocess.h"
+#include "TemporalMotionConsensus.h"
+#include "SpatialMotionConsensus.h"
+#include "fg/DlssFrameGenerationRunner.h"
+#include "fg/NvapiFgPreset.h"
+#include "NgxCoreSession.h"
 #include "ParallelRows.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <fstream>
 #include <iterator>
@@ -27,12 +35,18 @@ double Milliseconds(Clock::time_point begin, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
+
+uint32_t EffectiveFgMultiplier(const video::VideoSettings& settings) {
+    return settings.enableFrameGeneration2X ? std::clamp<uint32_t>(settings.fgMultiplier, 2u, 6u) : 1u;
+}
+
 struct PerfAccumulator {
     double decode = 0.0;
     double flow = 0.0;
     double denoise = 0.0;
     double depth = 0.0;
     double depthStabilize = 0.0;
+    double motionConsensus = 0.0;
     double dlssnr = 0.0;
     double outputStabilize = 0.0;
     double encode = 0.0;
@@ -52,6 +66,22 @@ std::string LowerAscii(std::string s) {
         if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
     }
     return s;
+}
+
+void ApplyVideoExecutionModePolicy() {
+    const char* rawMode = std::getenv("CROW_VIDEO_EXECUTION_MODE");
+    const std::string mode = rawMode ? LowerAscii(rawMode) : std::string{};
+    if (mode == "legacy" || mode == "safe" || mode == "legacy-safe") {
+        _putenv_s("DLSS5_DISABLE_D3D12_BATCH", "1");
+        _putenv_s("DLSS5_PERF_THREADS", "1");
+        return;
+    }
+
+    // Direct EXE launch and every non-legacy mode default to the full performance path.
+    // Clear inherited legacy-safe overrides so a previous diagnostic launch cannot
+    // silently keep the normal converter in the single-threaded synchronization path.
+    _putenv_s("DLSS5_DISABLE_D3D12_BATCH", "");
+    _putenv_s("DLSS5_PERF_THREADS", "");
 }
 
 std::string NormalizeCodecName(std::string codecName) {
@@ -210,7 +240,7 @@ void WriteDecoderPreflightLog(const std::filesystem::path& logPath,
                               const DecoderSelection& selection) {
     std::ofstream out(logPath, std::ios::binary | std::ios::trunc);
     if (!out) return;
-    out << "Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2 - Native NVOF D3D12 Execute - AV1 decoder preflight\n";
+    out << "Crow - DLSS Rendering Tool V0.7.3-alpha1 - Native NVOF D3D12 Execute - AV1 decoder preflight\n";
     out << "FFmpeg: " << ffmpeg.string() << "\n";
     out << "Input: " << input.string() << "\n";
     out << "Codec: " << info.codecName << "\n";
@@ -347,7 +377,7 @@ std::vector<std::wstring> EncoderArgs(const video::VideoSettings& settings, cons
         L"-y", L"-v", L"error", L"-nostats",
         L"-f", L"rawvideo", L"-pix_fmt", L"rgba",
         L"-s", std::to_wstring(info.width) + L"x" + std::to_wstring(info.height),
-        L"-r", FpsString(info.fps),
+        L"-r", FpsString(info.fps * static_cast<double>(EffectiveFgMultiplier(settings))),
         L"-i", L"pipe:0",
         L"-i", settings.input.wstring(),
         L"-map", L"0:v:0",
@@ -510,6 +540,7 @@ VideoInfo ProbeVideo(const std::filesystem::path& input,
 void ConvertVideo(const VideoSettings& settings,
                   const VideoCallbacks& callbacks,
                   std::atomic_bool& cancelRequested) {
+    ApplyVideoExecutionModePolicy();
     if (settings.input.empty() || settings.output.empty()) throw std::runtime_error("Input and output video paths are required");
     const auto inputAbs = std::filesystem::absolute(settings.input).lexically_normal();
     const auto outputAbs = std::filesystem::absolute(settings.output).lexically_normal();
@@ -521,7 +552,17 @@ void ConvertVideo(const VideoSettings& settings,
         throw std::runtime_error("ffmpeg.exe not found. Put it in dist\\video\\ffmpeg\\bin or run Setup Video Dependencies.");
     }
     const auto runtime = app::DefaultRuntimeDll();
-    if (!std::filesystem::exists(runtime)) throw std::runtime_error("nvngx_dlssnr.dll not found: " + runtime.string());
+    const auto runtimeDir = app::ExecutableDir() / L"runtime";
+    const auto fgRuntime = runtimeDir / L"nvngx_dlssg.dll";
+    if (!settings.enableDlssNr && !settings.enableFrameGeneration2X)
+        throw std::runtime_error("Enable at least one processing feature: DLSS5 Neural Rendering or Frame Generation.");
+    if (settings.enableDlssNr && !std::filesystem::exists(runtime))
+        throw std::runtime_error("nvngx_dlssnr.dll not found: " + runtime.string());
+    if (settings.enableFrameGeneration2X && !std::filesystem::exists(fgRuntime))
+        throw std::runtime_error("nvngx_dlssg.dll not found: " + fgRuntime.string());
+    if (settings.enableFrameGeneration2X && settings.temporalMode != TemporalMode::NvidiaOpticalFlow &&
+        settings.temporalMode != TemporalMode::SeaRaft && settings.temporalMode != TemporalMode::ExternalExr)
+        throw std::runtime_error("DLSS Frame Generation requires NVIDIA Optical Flow, SEA-RAFT Neural Motion, or External EXR Motion guidance.");
 
     VideoProgress progress;
     progress.stage = VideoProgress::Stage::Preparing;
@@ -535,6 +576,10 @@ void ConvertVideo(const VideoSettings& settings,
         if (av1Input) info.codecName = "av1";
     }
     progress.totalFrames = info.totalFrames;
+    const uint32_t fgMultiplier = EffectiveFgMultiplier(settings);
+    progress.totalOutputFrames = info.totalFrames ? info.totalFrames * static_cast<uint64_t>(fgMultiplier) : info.totalFrames;
+    progress.sourceFps = info.fps;
+    progress.outputFps = info.fps * static_cast<double>(fgMultiplier);
 
     if (!settings.output.parent_path().empty()) std::filesystem::create_directories(settings.output.parent_path());
     const auto logRoot = app::ExecutableDir() / L"video" / L"logs";
@@ -557,7 +602,7 @@ void ConvertVideo(const VideoSettings& settings,
         Emit(callbacks, progress);
     }
 
-    const bool externalDepthEnabled = settings.depthMode == DepthMode::ExternalExr;
+    const bool externalDepthEnabled = (settings.enableDlssNr || settings.enableFrameGeneration2X) && settings.depthMode == DepthMode::ExternalExr;
     const bool externalMotionEnabled = settings.temporalMode == TemporalMode::ExternalExr;
     std::unique_ptr<ExternalRenderDataReader> externalData;
     if (externalDepthEnabled || externalMotionEnabled) {
@@ -568,14 +613,43 @@ void ConvertVideo(const VideoSettings& settings,
         externalData->Validate();
     }
 
-    progress.message = L"Initializing D3D12 / DLSSNR Feature 18...";
+    // Apply the driver-level FG model override before any NGX core/feature is created.
+    // This gives the driver/NGX runtime the earliest possible opportunity to consume the profile setting.
+    if (settings.enableFrameGeneration2X) {
+        const auto presetResult = fg::ApplyFgModelPreset(settings.fgModelPreset);
+        if (!presetResult.ok) {
+            const std::string narrow(presetResult.message.begin(), presetResult.message.end());
+            throw std::runtime_error("FG model preset setup failed: " + narrow);
+        }
+        progress.message = presetResult.message;
+        Emit(callbacks, progress);
+    }
+
+    progress.message = settings.enableDlssNr && settings.enableFrameGeneration2X
+        ? L"Initializing shared NGX core / DLSSNR Feature 18 / DLSS Frame Generation/MFG..."
+        : (settings.enableDlssNr ? L"Initializing D3D12 / DLSSNR Feature 18..."
+                                 : L"Initializing D3D12 / DLSS Frame Generation/MFG...");
     Emit(callbacks, progress);
     D3D12Context d3d;
+    std::unique_ptr<NgxCoreSession> sharedNgxCore;
+    const bool sharedCore = settings.enableDlssNr && settings.enableFrameGeneration2X;
+    if (sharedCore) sharedNgxCore = std::make_unique<NgxCoreSession>(d3d, std::vector<std::filesystem::path>{runtime.parent_path(), runtimeDir});
+
     DlssNrSettings dlssSettings = settings.dlss;
     if (externalDepthEnabled) dlssSettings.depthInverted = settings.externalData.depth.depthInverted;
-    DlssNrRunner runner(d3d, runtime, dlssSettings);
+    std::unique_ptr<DlssNrRunner> runner;
+    if (settings.enableDlssNr)
+        runner = std::make_unique<DlssNrRunner>(d3d, runtime, dlssSettings, std::nullopt, !sharedCore);
+    std::unique_ptr<fg::DlssFrameGenerationRunner> fgRunner;
+    if (settings.enableFrameGeneration2X) {
+        fgRunner = std::make_unique<fg::DlssFrameGenerationRunner>(d3d, runtimeDir, !sharedCore);
+        if (fgMultiplier > fgRunner->Capability().maxMultiplier)
+            throw std::runtime_error("Requested FG/MFG multiplier is not supported by this GPU/runtime. Maximum supported multiplier is " +
+                                     std::to_string(fgRunner->Capability().maxMultiplier) + "X.");
+    }
+
     std::unique_ptr<AutoDepthVideoSession> autoDepth;
-    if (settings.depthMode == DepthMode::AutoDepth) {
+    if ((settings.enableDlssNr || settings.enableFrameGeneration2X) && settings.depthMode == DepthMode::AutoDepth) {
         progress.message = L"Loading Depth Anything V2 once for the video...";
         Emit(callbacks, progress);
         autoDepth = std::make_unique<AutoDepthVideoSession>(settings.autoDepthSize, &cancelRequested);
@@ -585,6 +659,14 @@ void ConvertVideo(const VideoSettings& settings,
     std::unique_ptr<TemporalFlowEstimator> temporal;
     std::unique_ptr<DisFlowVideoSession> disFlow;
     std::unique_ptr<NvofFlowSession> nvofFlow;
+    std::unique_ptr<SeaRaftFlowSession> seaRaftFlow;
+    std::unique_ptr<NvofFlowSession> coarseNvofFlow;
+    uint32_t coarseNvofWidth = 0;
+    uint32_t coarseNvofHeight = 0;
+    std::unique_ptr<NvofFlowSession> quarterNvofFlow;
+    uint32_t quarterNvofWidth = 0;
+    uint32_t quarterNvofHeight = 0;
+    std::unique_ptr<TemporalMotionConsensus> temporalConsensus;
     if (temporalEnabled) {
         TemporalFlowSettings t;
         t.analysisWidth = settings.flowAnalysisWidth;
@@ -609,6 +691,48 @@ void ConvertVideo(const VideoSettings& settings,
             nvofFlow = std::make_unique<NvofFlowSession>(d3d, info.width, info.height,
                                                          settings.sceneCutThreshold, settings.nvof,
                                                          &cancelRequested);
+            if ((settings.enableDlssNr || settings.enableFrameGeneration2X) &&
+                settings.nvof.reliability != NvofReliabilityMode::Off &&
+                info.width >= 128u && info.height >= 128u) {
+                coarseNvofWidth = std::max(64u, (info.width + 1u) / 2u);
+                coarseNvofHeight = std::max(64u, (info.height + 1u) / 2u);
+                NvofSettings coarseSettings = settings.nvof;
+                coarseSettings.outputGridSize = 4u; // deliberate low-frequency spatial prior
+                coarseSettings.outputCost = true;
+                coarseNvofFlow = std::make_unique<NvofFlowSession>(d3d, coarseNvofWidth, coarseNvofHeight,
+                                                                   settings.sceneCutThreshold, coarseSettings,
+                                                                   &cancelRequested);
+                // Strong mode adds a third 1/4-resolution hypothesis. This is deliberately
+                // not enabled for Auto: its purpose is to break severe periodic-texture phase
+                // ambiguity after proper low-pass filtering, not to become a permanent 3x NVOF tax.
+                if (settings.nvof.reliability == NvofReliabilityMode::Strong &&
+                    info.width >= 256u && info.height >= 256u) {
+                    quarterNvofWidth = std::max(64u, (info.width + 3u) / 4u);
+                    quarterNvofHeight = std::max(64u, (info.height + 3u) / 4u);
+                    NvofSettings quarterSettings = settings.nvof;
+                    quarterSettings.outputGridSize = 4u;
+                    quarterSettings.outputCost = true;
+                    quarterNvofFlow = std::make_unique<NvofFlowSession>(d3d, quarterNvofWidth, quarterNvofHeight,
+                                                                        settings.sceneCutThreshold, quarterSettings,
+                                                                        &cancelRequested);
+                }
+            }
+            if (settings.enableFrameGeneration2X && settings.nvof.reliability != NvofReliabilityMode::Off) {
+                temporalConsensus = std::make_unique<TemporalMotionConsensus>(info.width, info.height,
+                                                                              settings.nvof.reliability,
+                                                                              settings.nvof.outputGridSize);
+            }
+        } else if (settings.temporalMode == TemporalMode::SeaRaft) {
+            progress.message = L"Temporal mode: SEA-RAFT Neural (CUDA) - " +
+                std::wstring(settings.seaRaft.model == SeaRaftModel::Small ? L"Spring-S" : L"Spring-M") +
+                L", scale 2^" + std::to_wstring(settings.seaRaft.inferenceScale) +
+                L", iterations " + std::to_wstring(settings.seaRaft.refinementIterations) + L".";
+            Emit(callbacks, progress);
+            seaRaftFlow = std::make_unique<SeaRaftFlowSession>(info.width, info.height, settings.sceneCutThreshold, settings.seaRaft, &cancelRequested);
+            if (settings.enableFrameGeneration2X && settings.nvof.reliability != NvofReliabilityMode::Off) {
+                temporalConsensus = std::make_unique<TemporalMotionConsensus>(info.width, info.height,
+                                                                              settings.nvof.reliability, 4u);
+            }
         } else if (settings.temporalMode == TemporalMode::ExternalExr) {
             progress.message = settings.externalData.motion.direction == ExternalMotionDirection::PreviousToCurrent
                 ? L"Temporal mode: External EXR forward motion auto-inverted to current -> previous pixels."
@@ -621,7 +745,7 @@ void ConvertVideo(const VideoSettings& settings,
     }
 
     std::unique_ptr<TemporalDenoiser> denoiser;
-    if (settings.denoiseMode != DenoiseMode::Off) {
+    if (settings.enableDlssNr && settings.denoiseMode != DenoiseMode::Off) {
         TemporalDenoiseSettings d;
         d.mode = settings.denoiseMode;
         d.strength = settings.denoiseStrength;
@@ -649,16 +773,17 @@ void ConvertVideo(const VideoSettings& settings,
     Rgba8Image previousStableOutput;
     std::vector<float> previousStableDepth;
     std::ofstream temporalLog(temporalLogPath, std::ios::binary | std::ios::trunc);
-    if (temporalLog) temporalLog << "frame,scene_score,scene_cut,avg_mv_px,avg_confidence,reset,denoise_hist_w,denoise_spatial_w,denoise_reject,denoise_age\n";
+    if (temporalLog) temporalLog << "frame,scene_score,scene_cut,avg_mv_px,avg_confidence,repaired_fraction,local_mode_repair_fraction,affine_fallback_fraction,global_mv_x,global_mv_y,temporal_consensus_fraction,temporal_consensus_residual,temporal_consensus_history,spatial_consensus_fraction,spatial_consensus_residual,nr_safe_corrected_fraction,nr_history_rejected_fraction,mean_history_visibility,disoccluded_fraction,occlusion_ambiguous_fraction,high_uncertainty_fraction,reset,denoise_hist_w,denoise_spatial_w,denoise_reject,denoise_age\n";
     std::ofstream performanceLog(performanceLogPath, std::ios::binary | std::ios::trunc);
     if (performanceLog) {
-        performanceLog << "frame,decode_ms,flow_ms,denoise_ms,depth_ms,depth_stabilize_ms,dlssnr_ms,output_stabilize_ms,encode_ms,total_ms\n";
+        performanceLog << "frame,decode_ms,flow_ms,denoise_ms,depth_ms,depth_stabilize_ms,motion_consensus_ms,dlssnr_ms,output_stabilize_ms,encode_ms,total_ms\n";
     }
     PerfAccumulator perfTotal{};
 
     const auto started = Clock::now();
     auto lastPreview = started - std::chrono::seconds(1);
     uint64_t frame = 0;
+    uint64_t outputFrameCount = 0;
     progress.stage = VideoProgress::Stage::Processing;
     progress.message = L"Processing frames...";
     Emit(callbacks, progress);
@@ -685,6 +810,33 @@ void ConvertVideo(const VideoSettings& settings,
                 } else if (nvofFlow) {
                     flow = nvofFlow->Process(input);
                     temporalReset = flow.sceneCut;
+                    if (coarseNvofFlow) {
+                        const Rgba8Image coarseInput = DownsampleHalfForMotion(input);
+                        if (coarseInput.width == coarseNvofWidth && coarseInput.height == coarseNvofHeight) {
+                            const TemporalFlowResult coarseFlow = coarseNvofFlow->Process(coarseInput);
+                            if (!temporalReset && !coarseFlow.sceneCut) {
+                                flow = FuseCoarseNvofMotion(flow, coarseFlow, info.width, info.height,
+                                                            coarseNvofWidth, coarseNvofHeight,
+                                                            settings.nvof.reliability, 1.0f);
+                            }
+                        }
+                    }
+                    if (quarterNvofFlow) {
+                        const Rgba8Image quarterInput = DownsampleQuarterForMotion(input);
+                        if (quarterInput.width == quarterNvofWidth && quarterInput.height == quarterNvofHeight) {
+                            const TemporalFlowResult quarterFlow = quarterNvofFlow->Process(quarterInput);
+                            if (!temporalReset && !quarterFlow.sceneCut) {
+                                // The 1/4 prior is a low-frequency tie-breaker, not a replacement
+                                // field. Keep its correction budget below the 1/2-resolution prior.
+                                flow = FuseCoarseNvofMotion(flow, quarterFlow, info.width, info.height,
+                                                            quarterNvofWidth, quarterNvofHeight,
+                                                            settings.nvof.reliability, 0.62f);
+                            }
+                        }
+                    }
+                } else if (seaRaftFlow) {
+                    flow = seaRaftFlow->Process(input);
+                    temporalReset = flow.sceneCut;
                 } else if (disFlow) {
                     flow = disFlow->Process(input);
                     temporalReset = flow.sceneCut; // first DIS frame deliberately reports a cut/reset
@@ -696,14 +848,27 @@ void ConvertVideo(const VideoSettings& settings,
             }
             const auto flowFinished = Clock::now();
 
-            // 2) V0.6 pre-NR denoise. The history is motion compensated and variance-clipped,
-            // so static noise is accumulated away while scene cuts/disocclusions reject history.
+            // V0.7.3-alpha1 visibility-aware dual-path motion starts with a conservative NR-safe branch before
+            // depth is available. The stronger alpha2 repair remains available as FG's base field.
+            TemporalFlowResult nrPreFlow = flow;
+            const TemporalFlowResult* nrPreFlowPtr = temporalEnabled ? &flow : nullptr;
+            const std::vector<float>* nrMotionPtr = motionPtr;
+            if (settings.enableDlssNr && nvofFlow && !flow.motionXY.empty() &&
+                settings.nvof.reliability != NvofReliabilityMode::Off) {
+                nrPreFlow = BuildNrSafeReliableMotion(flow, nullptr, info.width, info.height,
+                                                      settings.nvof.reliability, settings.nvof.outputGridSize);
+                nrPreFlowPtr = &nrPreFlow;
+                if (!temporalReset) nrMotionPtr = &nrPreFlow.motionXY;
+            }
+
+            // 2) V0.6 pre-NR denoise. NR now consumes the NR-safe field/confidence so uncertain
+            // reprojection is rejected rather than inheriting FG's aggressive replacement policy.
             const auto denoiseStarted = Clock::now();
             TemporalDenoiseStats denoiseStats{};
             Rgba8Image nrInput = input;
             if (denoiser) {
                 nrInput = denoiser->Process(input,
-                                            temporalEnabled ? &flow : nullptr,
+                                            temporalEnabled ? nrPreFlowPtr : nullptr,
                                             !temporalEnabled || temporalReset,
                                             &denoiseStats);
             }
@@ -725,73 +890,212 @@ void ConvertVideo(const VideoSettings& settings,
             const auto depthStabilizeStarted = depthFinished;
             if (temporalEnabled && depthPtr && settings.temporalDepthStabilization &&
                 !temporalReset && !previousStableDepth.empty()) {
-                depth = temporal->StabilizeDepth(depth, previousStableDepth, info.width, info.height, flow);
+                depth = temporal->StabilizeDepth(depth, previousStableDepth, info.width, info.height,
+                                                 (settings.enableDlssNr && nvofFlow && settings.nvof.reliability != NvofReliabilityMode::Off)
+                                                     ? nrPreFlow : flow);
                 depthPtr = &depth;
             }
             const auto depthStabilizeFinished = Clock::now();
 
-            // 4) DLSSNR receives the temporally coherent color/depth/MV set. Post-NR output
-            // stabilization remains deliberately light; the heavy denoising happens before NR.
+            const auto motionConsensusStarted = depthStabilizeFinished;
+
+            // V0.7.3-alpha1 visibility-aware dual-path motion conditioning:
+            //   NR: raw NVOF + reliability confidence -> bounded correction + history rejection.
+            //   FG: alpha2 aggressive repair -> depth-aware repair -> alpha3 temporal consensus.
+            // Both branches share Cost/FB/photometric evidence but deliberately do not share the
+            // same final field. External EXR motion remains renderer guidance and is not rewritten.
+            TemporalFlowResult nrFlow = nrPreFlow;
+            if (settings.enableDlssNr && nvofFlow && !flow.motionXY.empty() &&
+                settings.nvof.reliability != NvofReliabilityMode::Off) {
+                nrFlow = BuildNrSafeReliableMotion(flow, depthPtr, info.width, info.height,
+                                                   settings.nvof.reliability, settings.nvof.outputGridSize);
+                if (!temporalReset) nrMotionPtr = &nrFlow.motionXY;
+            }
+
+            TemporalFlowResult fgFlow = flow;
+            const std::vector<float>* fgMotionPtr = motionPtr;
+            if (settings.enableFrameGeneration2X && nvofFlow && !flow.motionXY.empty() &&
+                settings.nvof.reliability != NvofReliabilityMode::Off) {
+                if (!temporalReset) {
+                    RefineReliableMotionWithDepth(fgFlow, depthPtr, info.width, info.height,
+                                                  settings.nvof.reliability, settings.nvof.outputGridSize);
+                }
+                if (temporalConsensus) {
+                    fgFlow = temporalConsensus->Stabilize(fgFlow, depthPtr, temporalReset);
+                }
+                if (!temporalReset) fgMotionPtr = &fgFlow.motionXY;
+            } else if (settings.enableFrameGeneration2X && seaRaftFlow && temporalConsensus) {
+                fgFlow = temporalConsensus->Stabilize(flow, depthPtr, temporalReset);
+                if (!temporalReset) fgMotionPtr = &fgFlow.motionXY;
+            } else if (temporalConsensus && temporalReset) {
+                temporalConsensus->Reset();
+            }
+
+            const auto motionConsensusFinished = Clock::now();
+
+            // 4) DLSSNR receives the NR-safe motion field, while FG consumes its independent
+            // stronger field below. Post-NR output stabilization uses the same NR-safe confidence.
             const auto dlssStarted = Clock::now();
             Rgba8Image output;
-            if (temporalEnabled) {
-                output = runner.ProcessTemporal(nrInput, depthPtr, motionPtr, temporalReset,
-                                                settings.mvecScaleX, settings.mvecScaleY);
+            if (settings.enableDlssNr) {
+                if (temporalEnabled) {
+                    output = runner->ProcessTemporal(nrInput, depthPtr, nrMotionPtr, temporalReset,
+                                                     settings.mvecScaleX, settings.mvecScaleY);
+                } else {
+                    output = runner->Process(nrInput, depthPtr);
+                }
             } else {
-                output = runner.Process(nrInput, depthPtr);
+                output = input;
             }
             const auto dlssFinished = Clock::now();
             const auto outputStabilizeStarted = dlssFinished;
-            if (temporalEnabled && settings.temporalOutputStabilization &&
+            if (settings.enableDlssNr && temporalEnabled && settings.temporalOutputStabilization &&
                 !temporalReset && !previousStableOutput.pixels.empty()) {
-                output = temporal->StabilizeOutput(output, previousStableOutput, flow);
+                output = temporal->StabilizeOutput(output, previousStableOutput,
+                                                  (settings.enableDlssNr && nvofFlow && settings.nvof.reliability != NvofReliabilityMode::Off)
+                                                      ? nrFlow : flow);
             }
             const auto outputStabilizeFinished = Clock::now();
 
             if (temporalLog && temporalEnabled) {
-                double avgMv = 0.0, avgConfidence = 0.0;
-                const size_t n = flow.confidence.size();
+                const TemporalFlowResult& loggedFlow = (settings.enableFrameGeneration2X && (nvofFlow || seaRaftFlow)) ? fgFlow :
+                                                       ((settings.enableDlssNr && nvofFlow) ? nrFlow : flow);
+                double avgMv = 0.0, avgConfidence = 0.0, avgVisibility = loggedFlow.meanHistoryVisibility;
+                double disoccludedFraction = loggedFlow.disoccludedFraction;
+                double occlusionAmbiguousFraction = loggedFlow.occlusionAmbiguousFraction;
+                double highUncertaintyFraction = loggedFlow.highUncertaintyFraction;
+                const size_t n = loggedFlow.confidence.size();
                 if (n) {
                     const unsigned workers = perf::WorkerCountForRows(info.height, 64u);
                     std::vector<double> mvSums(workers, 0.0);
                     std::vector<double> confidenceSums(workers, 0.0);
+                    std::vector<double> visibilitySums(workers, 0.0);
+                    std::vector<uint64_t> disoccludedCounts(workers, 0u);
+                    std::vector<uint64_t> occlusionCounts(workers, 0u);
+                    std::vector<uint64_t> uncertaintyCounts(workers, 0u);
+                    const bool haveVisibility = loggedFlow.historyVisibility.size() == n;
+                    const bool haveDisocclusion = loggedFlow.disocclusionProbability.size() == n;
+                    const bool haveOcclusion = loggedFlow.occlusionProbability.size() == n;
+                    const bool haveUncertainty = loggedFlow.motionUncertainty.size() == n;
                     perf::ParallelForRows(info.height, 64u, [&](uint32_t rowBegin, uint32_t rowEnd, unsigned worker) {
-                        double localMv = 0.0, localConfidence = 0.0;
+                        double localMv = 0.0, localConfidence = 0.0, localVisibility = 0.0;
+                        uint64_t localDisoccluded = 0u, localOcclusion = 0u, localUncertainty = 0u;
                         for (uint32_t y = rowBegin; y < rowEnd; ++y) {
                             const size_t first = static_cast<size_t>(y) * info.width;
                             const size_t last = std::min(n, first + static_cast<size_t>(info.width));
                             for (size_t i = first; i < last; ++i) {
-                                const double x = flow.motionXY.empty() ? 0.0 : flow.motionXY[i * 2u + 0u];
-                                const double yy = flow.motionXY.empty() ? 0.0 : flow.motionXY[i * 2u + 1u];
+                                const double x = loggedFlow.motionXY.empty() ? 0.0 : loggedFlow.motionXY[i * 2u + 0u];
+                                const double yy = loggedFlow.motionXY.empty() ? 0.0 : loggedFlow.motionXY[i * 2u + 1u];
                                 localMv += std::sqrt(x * x + yy * yy);
-                                localConfidence += flow.confidence[i];
+                                localConfidence += loggedFlow.confidence[i];
+                                if (haveVisibility) localVisibility += loggedFlow.historyVisibility[i];
+                                if (haveDisocclusion && loggedFlow.disocclusionProbability[i] >= 0.50f) ++localDisoccluded;
+                                if (haveOcclusion && loggedFlow.occlusionProbability[i] >= 0.50f) ++localOcclusion;
+                                if (haveUncertainty && loggedFlow.motionUncertainty[i] >= 0.65f) ++localUncertainty;
                             }
                         }
                         mvSums[worker] = localMv;
                         confidenceSums[worker] = localConfidence;
+                        visibilitySums[worker] = localVisibility;
+                        disoccludedCounts[worker] = localDisoccluded;
+                        occlusionCounts[worker] = localOcclusion;
+                        uncertaintyCounts[worker] = localUncertainty;
                     });
+                    double visibilityTotal = 0.0;
+                    uint64_t disoccludedTotal = 0u, occlusionTotal = 0u, uncertaintyTotal = 0u;
                     for (unsigned i = 0; i < workers; ++i) {
                         avgMv += mvSums[i];
                         avgConfidence += confidenceSums[i];
+                        visibilityTotal += visibilitySums[i];
+                        disoccludedTotal += disoccludedCounts[i];
+                        occlusionTotal += occlusionCounts[i];
+                        uncertaintyTotal += uncertaintyCounts[i];
                     }
                     avgMv /= static_cast<double>(n);
                     avgConfidence /= static_cast<double>(n);
+                    if (haveVisibility) avgVisibility = visibilityTotal / static_cast<double>(n);
+                    if (haveDisocclusion) disoccludedFraction = static_cast<double>(disoccludedTotal) / static_cast<double>(n);
+                    if (haveOcclusion) occlusionAmbiguousFraction = static_cast<double>(occlusionTotal) / static_cast<double>(n);
+                    if (haveUncertainty) highUncertaintyFraction = static_cast<double>(uncertaintyTotal) / static_cast<double>(n);
                 }
                 temporalLog << frame << ',' << flow.sceneCutScore << ',' << (flow.sceneCut ? 1 : 0) << ','
-                            << avgMv << ',' << avgConfidence << ',' << (temporalReset ? 1 : 0) << ','
+                            << avgMv << ',' << avgConfidence << ',' << loggedFlow.repairedFraction << ','
+                            << loggedFlow.localModeRepairedFraction << ',' << loggedFlow.affineFallbackFraction << ','
+                            << loggedFlow.robustGlobalMotionX << ',' << loggedFlow.robustGlobalMotionY << ','
+                            << loggedFlow.temporalConsensusCorrectedFraction << ','
+                            << loggedFlow.temporalConsensusMeanResidual << ','
+                            << loggedFlow.temporalConsensusHistory << ','
+                            << loggedFlow.spatialConsensusCorrectedFraction << ','
+                            << loggedFlow.spatialConsensusMeanResidual << ','
+                            << nrFlow.nrSafeCorrectedFraction << ','
+                            << nrFlow.nrHistoryRejectedFraction << ','
+                            << avgVisibility << ','
+                            << disoccludedFraction << ','
+                            << occlusionAmbiguousFraction << ','
+                            << highUncertaintyFraction << ','
+                            << (temporalReset ? 1 : 0) << ','
                             << denoiseStats.averageHistoryWeight << ',' << denoiseStats.averageSpatialWeight << ','
                             << denoiseStats.rejectedFraction << ',' << denoiseStats.averageHistoryAge << "\n";
             }
 
             const auto encodeStarted = Clock::now();
-            if (!encoder.WriteExact(output.pixels.data(), output.pixels.size(), &cancelRequested)) break;
+            bool outputOk = true;
+            auto publishOutput = [&](const Rgba8Image& encodedFrame, OutputFrameKind kind) -> bool {
+                if (!encoder.WriteExact(encodedFrame.pixels.data(), encodedFrame.pixels.size(), &cancelRequested))
+                    return false;
+                ++outputFrameCount;
+                progress.outputFrameIndex = outputFrameCount;
+
+                // Preview consumes the same final output sequence as the encoder. To keep 4K
+                // conversion responsive, UI copies are sampled to ~30 Hz; encoder frames are never dropped.
+                const auto previewNow = Clock::now();
+                if (callbacks.onPreview &&
+                    std::chrono::duration<double>(previewNow - lastPreview).count() >= (1.0 / 30.0)) {
+                    VideoPreviewStats stats;
+                    stats.frameKind = kind;
+                    stats.sourceFrameIndex = frame;
+                    stats.outputFrameIndex = outputFrameCount;
+                    stats.totalOutputFrames = progress.totalOutputFrames;
+                    stats.sourceFps = info.fps;
+                    stats.outputFps = info.fps * static_cast<double>(fgMultiplier);
+                    callbacks.onPreview(input, encodedFrame, depthPtr,
+                                        (settings.enableFrameGeneration2X && fgMotionPtr) ? fgMotionPtr :
+                                        ((settings.enableDlssNr && nrMotionPtr) ? nrMotionPtr : motionPtr),
+                                        settings.mvecScaleX, settings.mvecScaleY, stats);
+                    lastPreview = previewNow;
+                }
+                return true;
+            };
+
+            if (settings.enableFrameGeneration2X) {
+                // One real-frame interval expands to (multiplier-1) generated slots plus the current real frame.
+                // The same final real frame that is encoded is used as DLSS-G backbuffer input.
+                const uint32_t generatedCount = fgMultiplier - 1u;
+                const bool depthInverted = settings.depthMode == DepthMode::AutoDepth ||
+                                           (settings.depthMode == DepthMode::ExternalExr && settings.externalData.depth.depthInverted);
+                for (uint32_t generatedIndex = 1; generatedIndex <= generatedCount && outputOk; ++generatedIndex) {
+                    auto generated = fgRunner->GenerateFrame(output, fgMotionPtr ? *fgMotionPtr : flow.motionXY, depthPtr, depthInverted,
+                                                             temporalReset || frame == 1, frame - 1,
+                                                             generatedCount, generatedIndex);
+                    if (frame > 1) {
+                        if (generated) outputOk = publishOutput(*generated, OutputFrameKind::Generated);
+                        else if (!previousStableOutput.pixels.empty())
+                            outputOk = publishOutput(previousStableOutput, OutputFrameKind::Fallback);
+                    }
+                }
+                if (outputOk) outputOk = publishOutput(output, OutputFrameKind::Real);
+            } else {
+                outputOk = publishOutput(output, OutputFrameKind::Real);
+            }
             const auto encodeFinished = Clock::now();
+            if (!outputOk) break;
 
             const double decodeMs = Milliseconds(decodeStarted, decodeFinished);
             const double flowMs = Milliseconds(flowStarted, flowFinished);
             const double denoiseMs = Milliseconds(denoiseStarted, denoiseFinished);
             const double depthMs = Milliseconds(depthStarted, depthFinished);
             const double depthStabilizeMs = Milliseconds(depthStabilizeStarted, depthStabilizeFinished);
+            const double motionConsensusMs = Milliseconds(motionConsensusStarted, motionConsensusFinished);
             const double dlssMs = Milliseconds(dlssStarted, dlssFinished);
             const double outputStabilizeMs = Milliseconds(outputStabilizeStarted, outputStabilizeFinished);
             const double encodeMs = Milliseconds(encodeStarted, encodeFinished);
@@ -801,6 +1105,7 @@ void ConvertVideo(const VideoSettings& settings,
             perfTotal.denoise += denoiseMs;
             perfTotal.depth += depthMs;
             perfTotal.depthStabilize += depthStabilizeMs;
+            perfTotal.motionConsensus += motionConsensusMs;
             perfTotal.dlssnr += dlssMs;
             perfTotal.outputStabilize += outputStabilizeMs;
             perfTotal.encode += encodeMs;
@@ -808,7 +1113,7 @@ void ConvertVideo(const VideoSettings& settings,
             ++perfTotal.frames;
             if (performanceLog) {
                 performanceLog << frame << ',' << decodeMs << ',' << flowMs << ',' << denoiseMs << ','
-                               << depthMs << ',' << depthStabilizeMs << ',' << dlssMs << ','
+                               << depthMs << ',' << depthStabilizeMs << ',' << motionConsensusMs << ',' << dlssMs << ','
                                << outputStabilizeMs << ',' << encodeMs << ',' << totalMs << '\n';
             }
 
@@ -816,6 +1121,7 @@ void ConvertVideo(const VideoSettings& settings,
             const double elapsed = std::chrono::duration<double>(now - started).count();
             const double fps = elapsed > 0.001 ? static_cast<double>(frame) / elapsed : 0.0;
             progress.frameIndex = frame;
+            progress.outputFrameIndex = outputFrameCount;
             progress.processingFps = fps;
             progress.elapsedSeconds = elapsed;
             if (info.totalFrames) {
@@ -825,12 +1131,6 @@ void ConvertVideo(const VideoSettings& settings,
                 progress.fraction = std::clamp((static_cast<double>(frame) / info.fps) / info.durationSeconds, 0.0, 1.0);
             }
             Emit(callbacks, progress);
-
-            // Limit expensive UI image copies/painting to roughly 10 Hz. The processing stream itself stays full frame rate.
-            if (callbacks.onPreview && std::chrono::duration<double>(now - lastPreview).count() >= 0.10) {
-                callbacks.onPreview(input, output, depthPtr, motionPtr, settings.mvecScaleX, settings.mvecScaleY);
-                lastPreview = now;
-            }
 
             if (temporalEnabled) {
                 // Rotate full-resolution history buffers instead of copying ~66 MB of RGBA data
@@ -846,6 +1146,7 @@ void ConvertVideo(const VideoSettings& settings,
         }
 
         if (cancelRequested.load(std::memory_order_relaxed)) {
+            if (fgRunner) { try { fgRunner->Drain(); } catch (...) {} }
             // Tear down NVOF explicitly while D3D12Context is unquestionably alive. The
             // GUI no longer uses thread-wide CancelSynchronousIo because it can cancel
             // driver-internal synchronous I/O while nvofapi64.dll is executing.
@@ -858,6 +1159,16 @@ void ConvertVideo(const VideoSettings& settings,
             return;
         }
 
+        if (settings.enableFrameGeneration2X && frame > 0 && !previousStableOutput.pixels.empty()) {
+            // Preserve exact CFR duration: N source frames become N*multiplier output frames at multiplier*FPS.
+            for (uint32_t i = 1; i < fgMultiplier; ++i) {
+                if (!encoder.WriteExact(previousStableOutput.pixels.data(), previousStableOutput.pixels.size(), &cancelRequested))
+                    throw std::runtime_error("Encoder stopped while writing final MFG duration-preserving frames");
+                ++outputFrameCount;
+                progress.outputFrameIndex = outputFrameCount;
+            }
+        }
+        if (fgRunner) fgRunner->Drain();
         encoder.CloseInput();
         progress.stage = VideoProgress::Stage::Finalizing;
         progress.message = L"Finalizing video and audio...";
@@ -899,15 +1210,17 @@ void ConvertVideo(const VideoSettings& settings,
             std::ofstream summary(performanceSummaryPath, std::ios::binary | std::ios::trunc);
             if (summary) {
                 const double inv = 1.0 / static_cast<double>(perfTotal.frames);
-                summary << "Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2 - Native NVOF D3D12 Execute / Adaptive Stable Motion / Motion Preview / Parameter Persistence\n";
+                summary << "Crow - DLSS Rendering Tool V0.7.3-alpha1 - Temporal Consensus Motion / Adaptive Reliable Motion / Adaptive Stable Motion / Motion Preview / Parameter Persistence\n";
                 summary << "Frames: " << perfTotal.frames << "\n";
-                summary << "CPU worker limit (DLSS5_PERF_THREADS): auto unless overridden\n";
-                summary << "D3D12 batching: enabled unless DLSS5_DISABLE_D3D12_BATCH is set\n\n";
+                summary << "Video execution mode: PERFORMANCE by default; LEGACY only when CROW_VIDEO_EXECUTION_MODE=legacy\n";
+                summary << "CPU worker limit (DLSS5_PERF_THREADS): auto in Performance mode\n";
+                summary << "D3D12 batching: enabled in Performance mode\n\n";
                 summary << "Average decode_ms: " << perfTotal.decode * inv << "\n";
                 summary << "Average flow_ms: " << perfTotal.flow * inv << "\n";
                 summary << "Average denoise_ms: " << perfTotal.denoise * inv << "\n";
                 summary << "Average depth_ms: " << perfTotal.depth * inv << "\n";
                 summary << "Average depth_stabilize_ms: " << perfTotal.depthStabilize * inv << "\n";
+                summary << "Average motion_consensus_ms: " << perfTotal.motionConsensus * inv << "\n";
                 summary << "Average dlssnr_ms: " << perfTotal.dlssnr * inv << "\n";
                 summary << "Average output_stabilize_ms: " << perfTotal.outputStabilize * inv << "\n";
                 summary << "Average encode_ms: " << perfTotal.encode * inv << "\n";
@@ -919,10 +1232,12 @@ void ConvertVideo(const VideoSettings& settings,
         progress.stage = VideoProgress::Stage::Completed;
         progress.message = L"Completed. Performance report: video\\logs\\performance-summary-last.txt";
         progress.frameIndex = frame;
+        progress.outputFrameIndex = outputFrameCount;
         progress.fraction = 1.0;
         progress.elapsedSeconds = std::chrono::duration<double>(Clock::now() - started).count();
         Emit(callbacks, progress);
     } catch (...) {
+        if (fgRunner) { try { fgRunner->Drain(); } catch (...) {} }
         nvofFlow.reset();
         decoder.Terminate(); encoder.Terminate();
         std::error_code ec; std::filesystem::remove(settings.output, ec);

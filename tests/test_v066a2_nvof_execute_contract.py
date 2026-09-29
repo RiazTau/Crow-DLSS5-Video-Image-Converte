@@ -19,5 +19,6 @@ assert 'ExecuteCurrentToPrevious' in session
 assert 'PostprocessNvofFlow' in session
 assert '1.0f / 32.0f' in post
 assert 'Expected flow' in selftest and 'current->previous' in selftest
-assert (root/'NVOF_EXECUTE_SELFTEST.bat').exists()
+assert (root/'tools/dist/SELF_TESTS.bat').exists()
+assert 'configure_tool_output(crow-nvof-execute-selftest)' in cmake
 print('PASS: V0.6.6-alpha2 native NVOF D3D12 execute contract')

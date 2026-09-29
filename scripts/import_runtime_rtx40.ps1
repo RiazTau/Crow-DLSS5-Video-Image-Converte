@@ -9,8 +9,8 @@ if (-not $InstallRoot) { $InstallRoot = Join-Path $ProjectRoot 'dist' }
 if (-not $Source) {
     Add-Type -AssemblyName System.Windows.Forms
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.Filter = 'Experimental DLSSNR runtime (nvngx_dlssnr.dll)|nvngx_dlssnr.dll|DLL files (*.dll)|*.dll'
-    $dialog.Title = 'Select a legally obtained RTX40-compatible nvngx_dlssnr.dll'
+    $dialog.Filter = 'DLSSNR special runtime (nvngx_dlssnr.dll)|nvngx_dlssnr.dll|DLL files (*.dll)|*.dll'
+    $dialog.Title = 'Select DLSSNR special runtime for RTX 40-series'
     if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 1 }
     $Source = $dialog.FileName
 }
@@ -22,7 +22,7 @@ $Dest = Join-Path $RuntimeDir 'nvngx_dlssnr.dll'
 $hash = (Get-FileHash $Source -Algorithm SHA256).Hash
 $sig = Get-AuthenticodeSignature $Source
 $version = (Get-Item $Source).VersionInfo.FileVersion
-Write-Host 'V0.6.6-alpha2 - RTX40 runtime import (V0.6.2 compatibility layer)' -ForegroundColor Yellow
+Write-Host 'DLSSNR runtime import - RTX 40-series users require the special runtime version' -ForegroundColor Yellow
 Write-Host "Source:      $Source"
 Write-Host "Version:     $version"
 Write-Host "SHA256:      $hash"
@@ -40,5 +40,5 @@ runtime_sha256=$hash
 runtime_file_version=$version
 "@ | Set-Content -Path (Join-Path $RuntimeDir 'dlssnr-compat.ini') -Encoding ASCII
 Write-Host "Imported experimental runtime: $Dest" -ForegroundColor Green
-Write-Host "Compatibility profile: caller_mode=$CallerMode" -ForegroundColor Green
+Write-Host "RTX 40 special runtime profile: caller_mode=$CallerMode" -ForegroundColor Green
 Write-Host 'Next: run RTX40_RUNTIME_SELFTEST.bat before processing production images/videos.' -ForegroundColor Cyan

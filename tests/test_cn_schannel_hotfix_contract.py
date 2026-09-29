@@ -12,6 +12,6 @@ assert "--ssl-no-revoke" not in mirrors
 assert "Falling back to Invoke-WebRequest" in setup
 assert "falling back to Invoke-WebRequest" in mirrors
 assert "Compilation already succeeded. Continuing so RTX40 Runtime Self-Test" in auto
-assert "RTX40 experimental runtime users: CANCEL this picker" in auto
-assert "Crow-DLSS5-Video-Image-Converter-Runtime-Self-Test.exe" in auto
+assert "RTX 40-series users must select the special DLSSNR runtime version" in auto
+assert "Crow-DLSS-Rendering-Tool-Runtime-Self-Test.exe" in auto
 print("PASS: V0.6.2 CN Schannel download/build-resilience hotfix contract")

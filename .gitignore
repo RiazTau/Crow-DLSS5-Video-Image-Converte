@@ -1,0 +1,98 @@
+# Build output
+build/
+out/
+bin/
+/dist/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+x64/
+x86/
+portable/
+package/
+
+# Visual Studio / IDE
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+.idea/
+.vscode/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# Downloaded / local dependencies
+.deps/
+downloads/
+
+# NVIDIA / imported runtime files
+dist/nvngx_dlssnr.dll
+dist/runtime/nvngx_dlssnr.dll
+runtime/nvngx_dlssnr.dll
+nvngx_dlssnr.dll
+_nvngx*.dll
+
+# Downloaded model payloads
+dist/models/depth_anything_v2/model_fp16.onnx
+dist/models/depth_anything_v2/*.download
+*.onnx
+
+# Python runtime / cache
+dist/auto_depth/.venv/
+auto_depth/__pycache__/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime-generated settings
+dist/video/video-parameters.ini
+dist/image/image-parameters.ini
+*.local.ini
+*.local.json
+
+# Temporary data / logs / crash dumps
+temp/
+tmp/
+cache/
+logs/
+*.log
+*.dmp
+*.mdmp
+
+# Local test media / generated render data
+test_media/
+test-videos/
+test_videos/
+test-exr/
+test_exr/
+
+# Generated archives / release assets
+*.zip
+*.7z
+*.rar
+SHA256SUMS.txt
+
+# Credentials / secrets
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.*
+secrets.*
+token.*
+tokens.*
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -10,7 +10,7 @@ gui = (root/'src/video/VideoGuiApp.cpp').read_text(encoding='utf-8')
 dlg = (root/'src/video/ExternalRenderDataDialog.cpp').read_text(encoding='utf-8')
 img_h = (root/'src/ImageImport.h').read_text(encoding='utf-8')
 
-assert 'VERSION 0.6.5' in cmake or 'VERSION 0.6.6' in cmake
+assert 'VERSION 0.6.5' in cmake or 'VERSION 0.6.6' in cmake or 'VERSION 0.7.1' in cmake or 'VERSION 0.7.2' in cmake or 'VERSION 0.7.3' in cmake
 for src in ['src/video/ExternalSequence.cpp','src/video/ExternalRenderData.cpp','src/video/ExternalRenderDataDialog.cpp']:
     assert src in cmake
 assert 'ExternalExr = 2' in h
@@ -29,7 +29,7 @@ assert 'externalData->LoadMotion' in cpp
 assert 'externalData->LoadDepth' in cpp
 assert 'External EXR Sequence' in gui
 assert 'External EXR Motion - CG Ground Truth' in gui
-assert 'External Render Data...' in gui
+assert ('External Render Data...' in gui or 'External EXR Guidance (NR / FG)...' in gui)
 assert 'video-parameters.ini' in gui
 assert 'ExternalRenderData' in gui
 assert 'Sequence paths apply to this session only' in gui

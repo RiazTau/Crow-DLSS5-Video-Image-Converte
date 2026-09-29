@@ -12,10 +12,10 @@ required = [
     'case WM_MOUSEWHEEL:',
     'SetSidebarScrollPosition(s,next);',
     'SetWindowSubclass(ch,SidebarChildSubclassProc',
-    'y-scrollOffset',
+    'Y-scrollOffset',
     'scrollInfo.fMask=SIF_RANGE|SIF_PAGE|SIF_POS;',
     'ShowWindow(sidebarScroll,maxScroll>0?SW_SHOW:SW_HIDE);',
-    'm->ptMinTrackSize={1180,760}',
+    'm->ptMinTrackSize={DpiScale(s,1280),DpiScale(s,800)};',
 ]
 for needle in required:
     assert needle in src, f'missing scrollable-sidebar contract: {needle}'

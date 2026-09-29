@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "models": [
+    {
+      "id": "depth-anything-v2-small-fp16",
+      "purpose": "Automatic relative inverse depth guidance",
+      "destination": "models/depth_anything_v2/model_fp16.onnx",
+      "source": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/c70d1ddbcd93c9bda8098268cc3554adf5e8dd4f/onnx/model_fp16.onnx?download=true",
+      "sha256": "2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04",
+      "license": "Apache-2.0",
+      "auto_install": true
+    }
+  ]
+}

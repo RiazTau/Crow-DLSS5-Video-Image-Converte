@@ -68,8 +68,9 @@ def main() -> int:
             raise SystemExit(f"ZIP verification failed at: {bad}")
         names = set(zf.namelist())
         required = {
-            f"{root.name}/Crow-DLSS5-Video-Image-Converter-Video.exe",
+            f"{root.name}/Crow-DLSS-Rendering-Tool.exe",
             f"{root.name}/runtime/nvngx_dlssnr.dll",
+            f"{root.name}/runtime/nvngx_dlssg.dll",
             f"{root.name}/auto_depth/.venv/Scripts/python.exe",
         }
         missing = sorted(required - names)

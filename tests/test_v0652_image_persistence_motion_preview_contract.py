@@ -10,7 +10,7 @@ video_cpp = (root / 'src/video/VideoConverter.cpp').read_text(encoding='utf-8')
 motion_h = (root / 'src/video/MotionPreview.h').read_text(encoding='utf-8')
 motion_cpp = (root / 'src/video/MotionPreview.cpp').read_text(encoding='utf-8')
 
-assert 'VERSION 0.6.5.2' in cmake or 'VERSION 0.6.5.3' in cmake or 'VERSION 0.6.6' in cmake
+assert 'VERSION 0.6.5.2' in cmake or 'VERSION 0.6.5.3' in cmake or 'VERSION 0.6.6' in cmake or 'VERSION 0.7.1' in cmake or 'VERSION 0.7.2' in cmake or 'VERSION 0.7.3' in cmake
 assert 'src/video/MotionPreview.cpp' in cmake
 
 # Image converter now mirrors the video's explicit parameter persistence + per-control reset model.
@@ -26,8 +26,8 @@ assert 'ImageResetButtonId' in image_gui
 assert 'Reset All' not in image_gui
 block = image_gui.split('static constexpr ImageParameterSpec kImageParameterSpecs[] = {', 1)[1].split('};', 1)[0]
 ids = re.findall(r'\{(IDC_[A-Z0-9_]+),\s*ImageParameterKind::', block)
-assert len(ids) == 18, ids
-assert len(set(ids)) == 18
+assert len(ids) == 19, ids
+assert len(set(ids)) == 19
 assert 'Source/depth file paths, EXR layer/channel selections and runtime DLL are input-specific and are not persisted.' in image_gui
 
 # Four fixed preview panes form a true 2x2 matrix and are excluded from sidebar scrolling.

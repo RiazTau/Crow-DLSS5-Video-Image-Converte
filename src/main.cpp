@@ -1,4 +1,4 @@
-#include "AppPaths.h"
+﻿#include "AppPaths.h"
 #include "D3D12Context.h"
 #include "DlssNrRunner.h"
 #include "ImageImport.h"
@@ -75,7 +75,7 @@ Options ParseArgs(int argc, wchar_t** argv) {
     return o;
 }
 
-void PrintHelp(){std::cout<<R"(Crow-DLSS5-Video-Image-Converter V0.6.6-alpha2 - Native NVOF D3D12 Execute / Adaptive Stable Motion
+void PrintHelp(){std::cout<<R"(Crow - DLSS Rendering Tool V0.7.3-alpha1 - Native NVOF D3D12 Execute / Adaptive Reliable Motion / Adaptive Stable Motion
 
 GUI:
   Run "Crow-DLSS5-Video-Image-Converter-Image.exe"
